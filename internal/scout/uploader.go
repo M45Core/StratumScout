@@ -15,10 +15,11 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 const (
@@ -27,6 +28,7 @@ const (
 	batchInterval  = 5 * time.Second
 	initialBackoff = 250 * time.Millisecond
 	maxBackoff     = 5 * time.Second
+	maxRetryAfter  = 30 * time.Second
 )
 
 type envelope struct {
@@ -47,6 +49,12 @@ type uploadStats struct {
 	Uploaded int
 	Dropped  int
 	Failed   bool
+}
+
+type postResult struct {
+	accepted   int
+	retry      bool
+	retryAfter time.Duration
 }
 
 type uploader struct {
@@ -227,8 +235,9 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 	}
 	backoff := initialBackoff
 	for {
-		accepted, retry, err := u.post(ctx, payload)
+		result, err := u.post(ctx, payload)
 		if err == nil {
+			accepted := result.accepted
 			if accepted < 0 {
 				// The collector has already appended this exact batch but its
 				// original acknowledgement was lost. It has no response count
@@ -240,10 +249,14 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 			u.mu.Unlock()
 			return nil
 		}
-		if !retry {
+		if !result.retry {
 			return err
 		}
-		timer := time.NewTimer(backoff)
+		delay := backoff
+		if result.retryAfter > delay {
+			delay = result.retryAfter
+		}
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
@@ -273,10 +286,10 @@ func encodeEnvelope(value envelope) ([]byte, error) {
 	return compressed.Bytes(), nil
 }
 
-func (u *uploader) post(ctx context.Context, payload []byte) (accepted int, retry bool, err error) {
+func (u *uploader) post(ctx context.Context, payload []byte) (postResult, error) {
 	request, err := http.NewRequestWithContext(ctx, http.MethodPost, u.ingestURL.String(), bytes.NewReader(payload))
 	if err != nil {
-		return 0, false, err
+		return postResult{}, err
 	}
 	timestamp := strconv.FormatInt(time.Now().Unix(), 10)
 	mac := hmac.New(sha256.New, u.cfg.Secret)
@@ -289,21 +302,41 @@ func (u *uploader) post(ctx context.Context, payload []byte) (accepted int, retr
 	request.Header.Set("X-StratumStats-Signature", hex.EncodeToString(mac.Sum(nil)))
 	response, err := u.cfg.Client.Do(request)
 	if err != nil {
-		return 0, true, err
+		return postResult{retry: true}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusAccepted {
 		accepted, err := parseAccepted(response.Body)
 		if err != nil {
-			return 0, true, fmt.Errorf("decode collector acknowledgement: %w", err)
+			return postResult{retry: true}, fmt.Errorf("decode collector acknowledgement: %w", err)
 		}
-		return accepted, false, nil
+		return postResult{accepted: accepted}, nil
 	}
 	if response.StatusCode == http.StatusConflict {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-		return -1, false, nil
+		return postResult{accepted: -1}, nil
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 	err = fmt.Errorf("collector returned HTTP %d", response.StatusCode)
-	return 0, response.StatusCode >= 500, err
+	retry := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
+	return postResult{retry: retry, retryAfter: retryAfterDelay(response.Header.Get("Retry-After"), time.Now())}, err
+}
+
+func retryAfterDelay(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
+		if seconds >= int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	when, err := http.ParseTime(value)
+	if err != nil || !when.After(now) {
+		return 0
+	}
+	delay := when.Sub(now)
+	if delay > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return delay
 }

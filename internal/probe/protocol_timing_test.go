@@ -15,7 +15,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"sort"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 const (
@@ -32,12 +32,17 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 	var result coinbaseSummary
 	destinations := make(map[string]*model.CoinbaseOutput)
 	cursor := 0
-	take := func(n int) ([]byte, error) {
-		if n < 0 || cursor > len(raw)-n {
+	take := func(n uint64) ([]byte, error) {
+		if cursor > len(raw) {
 			return nil, fmt.Errorf("coinbase truncated at byte %d", cursor)
 		}
-		value := raw[cursor : cursor+n]
-		cursor += n
+		remaining := uint64(len(raw) - cursor) // #nosec G115 -- slice lengths are non-negative and fit uint64.
+		if n > remaining {
+			return nil, fmt.Errorf("coinbase truncated at byte %d", cursor)
+		}
+		count := int(n) // #nosec G115 -- n is bounded by the remaining slice length.
+		value := raw[cursor : cursor+count]
+		cursor += count
 		return value, nil
 	}
 	if _, err := take(4); err != nil {
@@ -66,7 +71,10 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 		if scriptLen > uint64(len(raw)) {
 			return result, fmt.Errorf("input script too large")
 		}
-		if _, err := take(int(scriptLen) + 4); err != nil {
+		if _, err := take(scriptLen); err != nil {
+			return result, err
+		}
+		if _, err := take(4); err != nil {
 			return result, err
 		}
 	}
@@ -95,7 +103,7 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 		if scriptLen > uint64(len(raw)) {
 			return result, fmt.Errorf("output script too large")
 		}
-		script, err := take(int(scriptLen))
+		script, err := take(scriptLen)
 		if err != nil {
 			return result, err
 		}
@@ -147,7 +155,7 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 				if itemLen > uint64(len(raw)) {
 					return result, fmt.Errorf("witness item too large")
 				}
-				if _, err := take(int(itemLen)); err != nil {
+				if _, err := take(itemLen); err != nil {
 					return result, err
 				}
 			}
@@ -195,15 +203,15 @@ func describeOutputScript(script []byte) (string, string) {
 		return base58Check(0x05, script[2:22]), "p2sh"
 	}
 	if len(script) >= 4 {
-		version := -1
+		version := byte(0xff)
 		switch {
 		case script[0] == 0x00:
 			version = 0
 		case script[0] >= 0x51 && script[0] <= 0x60:
-			version = int(script[0] - 0x50)
+			version = script[0] - 0x50
 		}
 		programLen := int(script[1])
-		if version >= 0 && programLen == len(script)-2 && programLen >= 2 && programLen <= 40 && (version != 0 || programLen == 20 || programLen == 32) {
+		if version <= 16 && programLen == len(script)-2 && programLen >= 2 && programLen <= 40 && (version != 0 || programLen == 20 || programLen == 32) {
 			scriptType := fmt.Sprintf("witness_v%d", version)
 			switch {
 			case version == 0 && programLen == 20:
@@ -232,8 +240,8 @@ func base58Check(prefix byte, payload []byte) string {
 	return base58(value)
 }
 
-func encodeWitnessAddress(version int, program []byte) string {
-	data := []byte{byte(version)}
+func encodeWitnessAddress(version byte, program []byte) string {
+	data := []byte{version}
 	data = append(data, bytesToBase32(program)...)
 	checksumConstant := uint32(1)
 	if version > 0 {

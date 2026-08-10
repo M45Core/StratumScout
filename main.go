@@ -6,7 +6,7 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/Distortions81/StratumScout/internal/scout"
+	"github.com/M45Core/StratumScout/internal/scout"
 )
 
 func main() {

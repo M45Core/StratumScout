@@ -4,22 +4,14 @@ import "time"
 
 // Pool describes one operator and the endpoints tested on equal terms.
 type Pool struct {
-	ID              string      `json:"id"`
-	Name            string      `json:"name"`
-	Operator        string      `json:"operator,omitempty"`
-	Website         string      `json:"website,omitempty"`
-	Category        string      `json:"category,omitempty"`
-	Status          string      `json:"status,omitempty"`
-	AuthModel       string      `json:"auth_model,omitempty"`
-	ProbeStatus     string      `json:"probe_status,omitempty"`
-	Description     string      `json:"description,omitempty"`
-	Products        []string    `json:"products,omitempty"`
-	AdvertisedFee   string      `json:"advertised_fee,omitempty"`
-	FeeCheckedAt    string      `json:"fee_checked_at,omitempty"`
-	LastVerified    string      `json:"last_verified,omitempty"`
-	ResearchSources []Reference `json:"research_sources,omitempty"`
-	Sources         []string    `json:"sources,omitempty"`
-	Endpoints       []Endpoint  `json:"endpoints"`
+	ID        string     `json:"id"`
+	Name      string     `json:"name"`
+	Operator  string     `json:"operator,omitempty"`
+	Website   string     `json:"website,omitempty"`
+	Category  string     `json:"category,omitempty"`
+	Status    string     `json:"status,omitempty"`
+	Products  []string   `json:"products,omitempty"`
+	Endpoints []Endpoint `json:"endpoints"`
 }
 
 type Endpoint struct {
@@ -29,26 +21,11 @@ type Endpoint struct {
 	Region string `json:"region,omitempty"`
 	// Continent is a coarse, best-effort location derived from Region. It is
 	// intentionally omitted for global and unlocated endpoints.
-	Continent string   `json:"continent,omitempty"`
-	Label     string   `json:"label,omitempty"`
-	Sources   []string `json:"sources,omitempty"`
-}
-
-type Reference struct {
-	Title string `json:"title"`
-	URL   string `json:"url"`
-}
-
-type RegistrySource struct {
-	Name string `json:"name"`
-	Path string `json:"path"`
+	Continent string `json:"continent,omitempty"`
 }
 
 type Config struct {
-	SchemaVersion int              `json:"schema_version,omitempty"`
-	GeneratedFrom []RegistrySource `json:"generated_from,omitempty"`
-	ResearchAsOf  string           `json:"research_as_of,omitempty"`
-	Pools         []Pool           `json:"pools"`
+	Pools []Pool `json:"pools"`
 }
 
 const (
@@ -137,12 +114,16 @@ type PoolReport struct {
 	PoolName                          string               `json:"pool_name"`
 	Category                          string               `json:"category,omitempty"`
 	Products                          []string             `json:"products,omitempty"`
-	Sources                           []string             `json:"sources,omitempty"`
 	Blocks                            int                  `json:"blocks"`
 	Arrivals                          int                  `json:"arrivals"`
 	MedianMS                          *float64             `json:"median_ms"`
 	P95MS                             *float64             `json:"p95_ms"`
 	EstimatedMiningLossPct            *float64             `json:"estimated_mining_loss_pct"`
+	OverallScore                      *float64             `json:"overall_score"`
+	RecentFeeIncreasePenalty          float64              `json:"recent_fee_increase_penalty,omitempty"`
+	HighFeePenalty                    float64              `json:"high_fee_penalty,omitempty"`
+	TLSCertificatePenalty             float64              `json:"tls_certificate_penalty,omitempty"`
+	ScoreOverrideReason               string               `json:"score_override_reason,omitempty"`
 	Availability                      float64              `json:"availability_pct"`
 	TLSObserved                       bool                 `json:"tls_observed"`
 	ConnectTiming                     TimingStats          `json:"connect_timing"`

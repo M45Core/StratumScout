@@ -15,7 +15,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 const AgentVersion = "0.1.0"
@@ -149,7 +149,7 @@ func fetchProbeConfig(ctx context.Context, cfg Config) (ProbeConfig, []model.Poo
 	pools := make([]model.Pool, 0, len(remote.Pools))
 	vantageContinent := continentForVantage(cfg.Vantage)
 	for _, pool := range remote.Pools {
-		converted := model.Pool{ID: pool.ID, ProbeStatus: "compatible"}
+		converted := model.Pool{ID: pool.ID}
 		for _, endpoint := range pool.Endpoints {
 			if cfg.FilterContinents && endpoint.Continent != "" && endpoint.Continent != vantageContinent {
 				continue

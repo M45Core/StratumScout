@@ -16,7 +16,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 const (
@@ -220,7 +220,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		return err
 	}
 	if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, model.ProtocolStatusOK, ""); err != nil {
-		rawConn.Close()
+		_ = rawConn.Close()
 		return err
 	}
 	defer rawConn.Close()
@@ -243,7 +243,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	go func() {
 		select {
 		case <-ctx.Done():
-			conn.Close()
+			_ = conn.Close()
 		case <-closeOnCancelDone:
 		}
 	}()

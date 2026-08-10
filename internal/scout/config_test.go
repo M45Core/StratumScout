@@ -88,7 +88,7 @@ func TestFetchProbeConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(pools) != 1 || pools[0].ProbeStatus != "compatible" || len(pools[0].Endpoints) != 3 || remote.ConfigRevision == "" {
+	if len(pools) != 1 || pools[0].ID != "pool" || len(pools[0].Endpoints) != 3 || remote.ConfigRevision == "" {
 		t.Fatalf("remote=%+v pools=%+v", remote, pools)
 	}
 	europeCfg := Config{CollectorURL: collectorURL, Vantage: "europe", FilterContinents: true, Client: server.Client()}

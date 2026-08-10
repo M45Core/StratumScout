@@ -4,7 +4,7 @@ set -euo pipefail
 scout_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 stats_dir="${STRATUMSTATS_DIR:-$scout_dir/../StratumStats}"
 
-if [[ ! -d "$stats_dir/internal/model" || ! -d "$stats_dir/internal/probe" ]]; then
+if [[ ! -d "$stats_dir/internal/model" ]]; then
   echo "StratumStats source not found at $stats_dir" >&2
   exit 1
 fi
@@ -14,11 +14,7 @@ for file in "${model_files[@]}"; do
   diff -u "$stats_dir/internal/model/$file" "$scout_dir/internal/model/$file"
 done
 
-for source in "$stats_dir"/internal/probe/*.go; do
-  file="$(basename "$source")"
-  diff -u \
-    <(sed 's#github.com/proofofmike/stratumstats/internal/model#github.com/Distortions81/StratumScout/internal/model#g' "$source") \
-    "$scout_dir/internal/probe/$file"
-done
-
-echo "StratumStats model and probe cores are in sync."
+# StratumScout owns the hardened network-facing probe implementation. Do not
+# overwrite it from StratumStats, whose optional local collector may evolve on
+# a different schedule.
+echo "StratumStats observation model is in sync; StratumScout owns the probe core."

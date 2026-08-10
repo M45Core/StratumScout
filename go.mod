@@ -1,3 +1,3 @@
-module github.com/Distortions81/StratumScout
+module github.com/M45Core/StratumScout
 
 go 1.26.5

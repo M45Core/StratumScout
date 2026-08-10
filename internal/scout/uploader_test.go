@@ -18,7 +18,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 func TestUploaderSignsCompressedEnvelopeAndRetriesServerFailure(t *testing.T) {
@@ -94,6 +94,39 @@ func TestUploaderDoesNotRetryClientFailure(t *testing.T) {
 	stats := u.closeAndFlush()
 	if attempts.Load() != 1 || stats.Dropped != 1 || !stats.Failed {
 		t.Fatalf("attempts=%d stats=%+v", attempts.Load(), stats)
+	}
+}
+
+func TestUploaderTreatsRateLimitAsRetryable(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		response.Header().Set("Retry-After", "1")
+		http.Error(response, "too many requests", http.StatusTooManyRequests)
+	}))
+	defer server.Close()
+	collectorURL, _ := url.Parse(server.URL)
+	u := &uploader{
+		cfg: Config{
+			KeyID: "current", Secret: []byte(strings.Repeat("k", 32)),
+			Client: server.Client(),
+		},
+		ingestURL: collectorURL.ResolveReference(&url.URL{Path: "/api/v1/ingest"}),
+	}
+	result, err := u.post(context.Background(), []byte("payload"))
+	if err == nil || !result.retry || result.retryAfter != time.Second {
+		t.Fatalf("result=%+v err=%v", result, err)
+	}
+}
+
+func TestRetryAfterDelayIsBounded(t *testing.T) {
+	now := time.Date(2026, time.August, 9, 12, 0, 0, 0, time.UTC)
+	if got := retryAfterDelay("1", now); got != time.Second {
+		t.Fatalf("one-second delay = %s", got)
+	}
+	if got := retryAfterDelay("3600", now); got != maxRetryAfter {
+		t.Fatalf("large delay = %s, want %s", got, maxRetryAfter)
+	}
+	if got := retryAfterDelay(now.Add(2*time.Second).Format(http.TimeFormat), now); got != 2*time.Second {
+		t.Fatalf("HTTP-date delay = %s", got)
 	}
 }
 

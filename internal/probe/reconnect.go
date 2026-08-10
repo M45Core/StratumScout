@@ -9,7 +9,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/Distortions81/StratumScout/internal/model"
+	"github.com/M45Core/StratumScout/internal/model"
 )
 
 // watch keeps a pool endpoint represented through ordinary transient network
