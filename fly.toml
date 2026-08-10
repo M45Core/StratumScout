@@ -1,0 +1,13 @@
+primary_region = "lax"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  COLLECTOR_URL = "https://stratumstats.m45core.com"
+  RUN_FOR = "14m"
+
+[[vm]]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "256mb"
