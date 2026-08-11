@@ -149,6 +149,7 @@ while IFS=$'\t' read -r machine_id region; do
   "$fly_cmd" machine update "$machine_id" \
     --app "$app" \
     --image "$image" \
+    --env CONTINUOUS=false \
     --schedule hourly \
     --restart no \
     --skip-start \

@@ -30,7 +30,7 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CollectorURL.String() != "https://stats.example.com" || cfg.Vantage != "us-west" || cfg.RunFor != 30*time.Second || cfg.Continuous || cfg.ProcessNice != 0 || cfg.FilterContinents {
+	if cfg.CollectorURL.String() != "https://stats.example.com" || cfg.Vantage != "us-west" || cfg.RunFor != 30*time.Second || !cfg.Continuous || cfg.ProcessNice != 0 || cfg.FilterContinents {
 		t.Fatalf("collector=%q vantage=%q duration=%s continuous=%t nice=%d filter=%t", cfg.CollectorURL, cfg.Vantage, cfg.RunFor, cfg.Continuous, cfg.ProcessNice, cfg.FilterContinents)
 	}
 	if cfg.Client.CheckRedirect == nil || cfg.Client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
@@ -75,10 +75,10 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal("invalid continent filter accepted")
 	}
 	environment["FILTER_CONTINENTS"] = ""
-	environment["CONTINUOUS"] = "true"
+	environment["CONTINUOUS"] = "false"
 	environment["PROCESS_NICE"] = "10"
 	cfg, err = LoadConfig(func(key string) string { return environment[key] })
-	if err != nil || !cfg.Continuous || cfg.ProcessNice != 10 {
+	if err != nil || cfg.Continuous || cfg.ProcessNice != 10 {
 		t.Fatalf("continuous config=%+v err=%v", cfg, err)
 	}
 	for key, value := range map[string]string{"CONTINUOUS": "sometimes", "PROCESS_NICE": "20"} {

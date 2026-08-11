@@ -97,7 +97,7 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if runFor <= 0 || runFor > 14*time.Minute {
 		return Config{}, errors.New("RUN_FOR must be greater than zero and at most 14 minutes")
 	}
-	continuous := false
+	continuous := true
 	if raw := strings.TrimSpace(getenv("CONTINUOUS")); raw != "" {
 		continuous, err = strconv.ParseBool(raw)
 		if err != nil {

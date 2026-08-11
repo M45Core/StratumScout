@@ -123,7 +123,8 @@ printf 'INGEST_KEY_ID=%s\nINGEST_SECRET=%s\n' "$INGEST_KEY_ID" "$INGEST_SECRET" 
     --vm-cpus 1 \
     --vm-memory 256 \
     --env COLLECTOR_URL=https://stratumstats.m45core.com \
-    --env RUN_FOR=14m
+    --env RUN_FOR=14m \
+    --env CONTINUOUS=false
 )
 
 machines="$(fly machine list --app "$app" --json)"
