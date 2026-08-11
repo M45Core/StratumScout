@@ -44,7 +44,7 @@ type CoinbaseOutput struct {
 	Address               string `json:"address,omitempty"`
 	ScriptType            string `json:"script_type"`
 	// Worker exists only to recognize and redact legacy version 7 records.
-	// Version 8 observations never serialize a matched worker destination.
+	// Version 8 and later observations never serialize a matched worker destination.
 	Worker bool `json:"worker,omitempty"`
 }
 
@@ -112,6 +112,10 @@ type Observation struct {
 type PoolReport struct {
 	PoolID                            string               `json:"pool_id"`
 	PoolName                          string               `json:"pool_name"`
+	Endpoint                          string               `json:"endpoint"`
+	EndpointTLS                       bool                 `json:"endpoint_tls"`
+	EndpointRegion                    string               `json:"endpoint_region,omitempty"`
+	LastObservedAt                    *time.Time           `json:"last_observed_at,omitempty"`
 	Category                          string               `json:"category,omitempty"`
 	Products                          []string             `json:"products,omitempty"`
 	Blocks                            int                  `json:"blocks"`
@@ -151,12 +155,13 @@ type PoolReport struct {
 }
 
 type Snapshot struct {
-	GeneratedAt         time.Time    `json:"generated_at"`
-	Methodology         string       `json:"methodology_version"`
-	LatencyWindowHours  int          `json:"latency_window_hours"`
-	BlocksObserved      int          `json:"blocks_observed"`
-	EligiblePoolSamples int          `json:"eligible_pool_samples"`
-	TemplateDeliveries  int          `json:"template_deliveries"`
-	Reports             []PoolReport `json:"reports"`
-	Disclosure          []string     `json:"disclosure"`
+	GeneratedAt             time.Time    `json:"generated_at"`
+	Methodology             string       `json:"methodology_version"`
+	LatencyWindowHours      int          `json:"latency_window_hours"`
+	RetentionWindowDays     int          `json:"retention_window_days"`
+	BlocksObserved          int          `json:"blocks_observed"`
+	EligibleEndpointSamples int          `json:"eligible_endpoint_samples"`
+	TemplateDeliveries      int          `json:"template_deliveries"`
+	Reports                 []PoolReport `json:"reports"`
+	Disclosure              []string     `json:"disclosure"`
 }

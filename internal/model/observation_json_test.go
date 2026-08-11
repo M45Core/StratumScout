@@ -34,7 +34,7 @@ func TestObservationPrefersVersion3Names(t *testing.T) {
 	}
 }
 
-func TestObservationVersion8NeverSerializesWorkerDestination(t *testing.T) {
+func TestCurrentObservationVersionNeverSerializesWorkerDestination(t *testing.T) {
 	const workerAddress = "12ZEw5Hcv1hTb6YUQJ69y1V7uhcoDz92PH"
 	const workerScript = "76a914111111111111111111111111111111111111111188ac"
 	const publicAddress = "bc1qw508d6qejxtdg4y5r3zarvary0c5xw7kv8f3t4"

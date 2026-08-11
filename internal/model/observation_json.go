@@ -20,7 +20,7 @@ func (o Observation) MarshalJSON() ([]byte, error) {
 	return json.Marshal(redacted)
 }
 
-// UnmarshalJSON keeps version 1-7 JSONL readable after later schema additions.
+// UnmarshalJSON keeps legacy observation JSON readable after schema additions.
 // Version 3 replaced contest-oriented names with block/report terminology.
 func (o *Observation) UnmarshalJSON(data []byte) error {
 	type observationAlias Observation

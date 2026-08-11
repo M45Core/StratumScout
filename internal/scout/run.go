@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -46,7 +47,7 @@ func Run(ctx context.Context, cfg Config) error {
 		countersMu.Lock()
 		for _, record := range records {
 			if record.RecordType == model.RecordTypeProtocol && record.ProtocolMethod == model.ProtocolAuthorize && record.ResponseStatus == model.ProtocolStatusOK {
-				successful[record.PoolID+"\x00"+record.Endpoint] = true
+				successful[record.PoolID+"\x00"+record.Endpoint+"\x00"+strconv.FormatBool(record.TLS)] = true
 			}
 			if record.RecordType == "" && record.Arrived && record.BlockID != "" {
 				blocks[record.BlockID] = true
