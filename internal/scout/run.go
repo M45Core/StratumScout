@@ -9,7 +9,6 @@ import (
 	"log"
 	"os"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/M45Core/StratumScout/internal/model"
@@ -66,26 +65,74 @@ func runContinuously(ctx context.Context, cfg Config, run func(context.Context, 
 }
 
 func Run(ctx context.Context, cfg Config) error {
-	hardCtx, hardCancel := context.WithTimeout(ctx, cfg.RunFor+45*time.Second)
+	hardCtx, hardCancel := context.WithCancel(ctx)
+	if !cfg.Continuous {
+		hardCtx, hardCancel = context.WithTimeout(ctx, cfg.RunFor+45*time.Second)
+	}
 	defer hardCancel()
 	remote, pools, err := fetchProbeConfig(hardCtx, cfg)
 	if err != nil {
 		return err
 	}
-	runID, err := randomID()
-	if err != nil {
-		return err
+	var runID string
+	var startedAt time.Time
+	var upload *uploader
+	measureCtx, measureCancel := context.WithCancel(hardCtx)
+	if !cfg.Continuous {
+		measureCtx, measureCancel = context.WithTimeout(hardCtx, cfg.RunFor)
 	}
-	startedAt := time.Now().UTC()
-	upload := newUploader(hardCtx, cfg, runID, startedAt, remote.ConfigRevision)
-	measureCtx, measureCancel := context.WithTimeout(hardCtx, cfg.RunFor)
 	defer measureCancel()
 
-	var countersMu sync.Mutex
 	successful := make(map[string]bool)
 	blocks := make(map[string]bool)
+	startCohort := func() error {
+		var err error
+		runID, err = randomID()
+		if err != nil {
+			return err
+		}
+		startedAt = time.Now().UTC()
+		upload = newUploader(hardCtx, cfg, runID, startedAt, remote.ConfigRevision)
+		blocks = make(map[string]bool)
+		mode := "continuous"
+		if !cfg.Continuous {
+			mode = cfg.RunFor.String()
+		}
+		log.Printf("probe run=%s region=%s vantage=%s endpoints=%d mode=%s", runID, cfg.Region, cfg.Vantage, endpointCount(pools), mode)
+		return nil
+	}
+	completeCohort := func(status string) error {
+		currentUpload := upload
+		upload = nil
+		stats := currentUpload.closeAndFlush()
+		if status == "ok" && (stats.Failed || stats.Dropped > 0) {
+			status = "partial"
+		}
+		now := time.Now().UTC()
+		final := model.Observation{
+			Version:              model.ObservationVersion,
+			RecordType:           model.RecordTypeProbeRun,
+			ObservedAt:           now,
+			Vantage:              cfg.Vantage,
+			RunStartedAt:         &startedAt,
+			RunStatus:            status,
+			ConfiguredEndpoints:  endpointCount(pools),
+			SuccessfulSessions:   len(successful),
+			AcceptedBlocks:       len(blocks),
+			UploadedObservations: stats.Uploaded,
+			DroppedObservations:  stats.Dropped,
+		}
+		if err := currentUpload.uploadFinal(hardCtx, final); err != nil {
+			return fmt.Errorf("upload final probe status: %w", err)
+		}
+		log.Printf("probe run=%s status=%s sessions=%d blocks=%d uploaded=%d dropped=%d", runID, status, len(successful), len(blocks), stats.Uploaded+1, stats.Dropped)
+		return nil
+	}
+	if err := startCohort(); err != nil {
+		return err
+	}
 	emit := func(records []model.Observation) error {
-		countersMu.Lock()
+		finalizedBlock := hasFinalizedBlock(records)
 		for _, record := range records {
 			if record.RecordType == model.RecordTypeProtocol && record.ProtocolMethod == model.ProtocolAuthorize && record.ResponseStatus == model.ProtocolStatusOK {
 				successful[record.PoolID+"\x00"+record.Endpoint+"\x00"+strconv.FormatBool(record.TLS)] = true
@@ -94,44 +141,52 @@ func Run(ctx context.Context, cfg Config) error {
 				blocks[record.BlockID] = true
 			}
 		}
-		countersMu.Unlock()
-		return upload.enqueue(records)
+		if err := upload.enqueue(records); err != nil {
+			return err
+		}
+		if cfg.Continuous && finalizedBlock {
+			if err := completeCohort("ok"); err != nil {
+				return err
+			}
+			return startCohort()
+		}
+		return nil
 	}
 
-	log.Printf("probe run=%s region=%s vantage=%s endpoints=%d duration=%s", runID, cfg.Region, cfg.Vantage, endpointCount(pools), cfg.RunFor)
 	collectErr := probe.Collect(measureCtx, pools, cfg.Vantage, emit)
-	if collectErr != nil && !errors.Is(collectErr, context.DeadlineExceeded) && !errors.Is(collectErr, context.Canceled) {
-		log.Print("collector stopped unexpectedly")
+	if cfg.Continuous && ctx.Err() != nil {
+		if upload != nil {
+			upload.closeAndFlush()
+		}
+		return nil
 	}
-	stats := upload.closeAndFlush()
-	countersMu.Lock()
-	successCount, blockCount := len(successful), len(blocks)
-	countersMu.Unlock()
 	status := "ok"
-	if collectErr != nil && !errors.Is(collectErr, context.DeadlineExceeded) && !errors.Is(collectErr, context.Canceled) {
+	unexpectedStop := cfg.Continuous || (collectErr != nil && !errors.Is(collectErr, context.DeadlineExceeded) && !errors.Is(collectErr, context.Canceled))
+	if unexpectedStop {
+		log.Print("collector stopped unexpectedly")
 		status = "error"
-	} else if stats.Failed || stats.Dropped > 0 {
-		status = "partial"
 	}
-	now := time.Now().UTC()
-	final := model.Observation{
-		Version:              model.ObservationVersion,
-		RecordType:           model.RecordTypeProbeRun,
-		ObservedAt:           now,
-		Vantage:              cfg.Vantage,
-		RunStartedAt:         &startedAt,
-		RunStatus:            status,
-		ConfiguredEndpoints:  endpointCount(pools),
-		SuccessfulSessions:   successCount,
-		AcceptedBlocks:       blockCount,
-		UploadedObservations: stats.Uploaded,
-		DroppedObservations:  stats.Dropped,
+	if upload != nil {
+		if err := completeCohort(status); err != nil {
+			return err
+		}
 	}
-	if err := upload.uploadFinal(hardCtx, final); err != nil {
-		return fmt.Errorf("upload final probe status: %w", err)
+	if unexpectedStop {
+		if collectErr != nil {
+			return fmt.Errorf("collector stopped unexpectedly: %w", collectErr)
+		}
+		return errors.New("collector stopped unexpectedly")
 	}
-	log.Printf("probe run=%s status=%s sessions=%d blocks=%d uploaded=%d dropped=%d", runID, status, successCount, blockCount, stats.Uploaded+1, stats.Dropped)
 	return nil
+}
+
+func hasFinalizedBlock(records []model.Observation) bool {
+	for _, record := range records {
+		if record.RecordType == "" && record.BlockID != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func randomID() (string, error) {

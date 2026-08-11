@@ -20,7 +20,7 @@ import (
 )
 
 const (
-	blockWindow           = 15 * time.Second
+	blockWindow           = 30 * time.Second
 	maxStratumMessageSize = 256 << 10
 )
 

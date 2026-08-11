@@ -5,8 +5,6 @@ primary_region = "lax"
 
 [env]
   COLLECTOR_URL = "https://stratumstats.m45core.com"
-  RUN_FOR = "14m"
-  CONTINUOUS = "false"
 
 [[vm]]
   cpu_kind = "shared"
