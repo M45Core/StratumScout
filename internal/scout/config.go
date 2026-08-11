@@ -29,7 +29,7 @@ const (
 var regionVantages = map[string]string{
 	"lax": "us-west",
 	"dfw": "us-central",
-	"iad": "us-east",
+	"ewr": "us-east",
 	"fra": "europe",
 }
 

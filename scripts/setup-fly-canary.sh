@@ -139,4 +139,4 @@ fi
 echo "Created the single lax canary Machine."
 echo "Inspect with: fly machine list --app $app"
 echo "Follow logs with: fly logs --app $app"
-echo "Do not add dfw, iad, or fra until the 48-hour canary gate passes."
+echo "Do not add dfw, ewr, or fra until the 48-hour canary gate passes."

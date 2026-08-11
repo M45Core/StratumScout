@@ -44,6 +44,14 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Vantage != "europe" {
 		t.Fatalf("Frankfurt vantage=%q, want europe", cfg.Vantage)
 	}
+	environment["FLY_REGION"] = "ewr"
+	cfg, err = LoadConfig(func(key string) string { return environment[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Vantage != "us-east" {
+		t.Fatalf("Secaucus vantage=%q, want us-east", cfg.Vantage)
+	}
 	environment["FLY_REGION"] = "ord"
 	if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
 		t.Fatal("unknown region accepted")

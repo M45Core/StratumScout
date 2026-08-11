@@ -21,7 +21,7 @@ Options:
   -h, --help  Show this help.
 
 The script requires exactly one Machine in each configured region, permits only
-lax, dfw, iad, and fra, and refuses public IPs, services, mounts, standby
+lax, dfw, ewr, and fra, and refuses public IPs, services, mounts, standby
 Machines, non-hourly schedules, or restart policies other than no.
 EOF
 }
@@ -85,13 +85,13 @@ fi
 
 inventory_errors="$(jq -r '
   group_by(.region)[] |
-  select(length != 1 or ([.[].region] | all(. == "lax" or . == "dfw" or . == "iad" or . == "fra") | not)) |
+  select(length != 1 or ([.[].region] | all(. == "lax" or . == "dfw" or . == "ewr" or . == "fra") | not)) |
   "invalid region inventory: " + (map(.region) | join(","))
 ' <<<"$machines")"
 regions="$(jq -r 'map(.region) | sort | join(" ")' <<<"$machines")"
-if [[ -n "$inventory_errors" || "$regions" != "dfw fra iad lax" ]]; then
+if [[ -n "$inventory_errors" || "$regions" != "dfw ewr fra lax" ]]; then
   [[ -z "$inventory_errors" ]] || echo "$inventory_errors" >&2
-  echo "Expected exactly one Machine in each of dfw, fra, iad, and lax; found: $regions" >&2
+  echo "Expected exactly one Machine in each of dfw, ewr, fra, and lax; found: $regions" >&2
   exit 1
 fi
 
@@ -121,7 +121,7 @@ if [[ "$(jq 'length' <<<"$ips")" -ne 0 ]]; then
 fi
 
 commit="$(git -C "$repo_dir" rev-parse --short=12 HEAD)"
-echo "Validated app $app: one safe hourly Machine in each of dfw, fra, iad, and lax."
+echo "Validated app $app: one safe hourly Machine in each of dfw, ewr, fra, and lax."
 echo "Image tag: registry.fly.io/$app:$commit"
 if [[ "$apply" != true ]]; then
   echo "Dry run; no Fly resources were changed. Rerun with --apply after review."
