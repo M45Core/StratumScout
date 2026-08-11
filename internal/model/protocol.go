@@ -1,6 +1,8 @@
 package model
 
 const (
+	SourceRemoteScheduled = "fly-scheduled"
+
 	RecordTypeProtocol = "protocol"
 	RecordTypeProbeRun = "probe_run"
 
