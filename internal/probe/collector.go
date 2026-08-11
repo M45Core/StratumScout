@@ -23,8 +23,13 @@ const (
 	blockWindow           = 30 * time.Second
 	activeBlockLimit      = 32
 	completedBlockLimit   = 256
+	connectionMaxAge      = 2 * time.Hour
 	maxStratumMessageSize = 256 << 10
 )
+
+// ErrConnectionRefresh asks the long-lived Scout runner to recreate its pool
+// sessions without terminating the process or its current reporting cohort.
+var ErrConnectionRefresh = errors.New("refresh Stratum connections")
 
 var (
 	errPoolRejected           = errors.New("pool rejected probe")
@@ -76,6 +81,8 @@ type activeBlock struct {
 // Collect connects to every configured endpoint and emits block and protocol
 // observations. It submits no shares and never stores randomized credentials.
 func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func([]model.Observation) error) error {
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 	events := make(chan event, 256)
 	configured := make(map[string]endpointTarget)
 	var wg sync.WaitGroup
@@ -98,6 +105,7 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 	blocks := map[string]*activeBlock{}
 	completedBlocks := map[string]bool{}
 	completedBlockOrder := make([]string, 0, completedBlockLimit)
+	refreshEligibleAt := time.Now().Add(connectionMaxAge)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	finish := func(r *activeBlock) error {
@@ -132,6 +140,7 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 			}
 			recordBlockEvent(r, e)
 		case now := <-ticker.C:
+			completedBlock := false
 			for id, r := range blocks {
 				if now.Sub(r.started) >= blockWindow {
 					if err := finish(r); err != nil {
@@ -139,10 +148,18 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 					}
 					completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, id)
 					delete(blocks, id)
+					completedBlock = true
 				}
+			}
+			if shouldRefreshConnections(now, refreshEligibleAt, completedBlock, len(blocks)) {
+				return ErrConnectionRefresh
 			}
 		}
 	}
+}
+
+func shouldRefreshConnections(now, eligibleAt time.Time, completedBlock bool, activeBlocks int) bool {
+	return completedBlock && !now.Before(eligibleAt) && activeBlocks == 0
 }
 
 // rememberCompletedBlock bounds process-lifetime deduplication state. The
@@ -238,6 +255,8 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, protocolErrorStatus(err), "connect_failed")
 		return err
 	}
+	stopContextClose := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
+	defer stopContextClose()
 	if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, model.ProtocolStatusOK, ""); err != nil {
 		_ = rawConn.Close()
 		return err

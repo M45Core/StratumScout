@@ -153,7 +153,14 @@ func Run(ctx context.Context, cfg Config) error {
 		return nil
 	}
 
-	collectErr := probe.Collect(measureCtx, pools, cfg.Vantage, emit)
+	var collectErr error
+	for {
+		collectErr = probe.Collect(measureCtx, pools, cfg.Vantage, emit)
+		if !errors.Is(collectErr, probe.ErrConnectionRefresh) {
+			break
+		}
+		log.Print("refreshing Stratum sessions after maximum connection age")
+	}
 	if cfg.Continuous && ctx.Err() != nil {
 		if upload != nil {
 			upload.closeAndFlush()

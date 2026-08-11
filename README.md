@@ -26,6 +26,13 @@ By default, the process stays connected continuously. Each reporting cohort:
 6. rotates only the reporting run ID while the process and pool connections
    remain active for the next block.
 
+Pool sessions are periodically refreshed for setup telemetry. After two hours
+of connection age, Scout waits for the next completed 30-second block window,
+publishes that block, and immediately reconnects. The Scout process and current
+reporting cohort remain alive across this planned refresh. This yields roughly
+a dozen connect, TLS, subscribe, and authorize samples per endpoint per day
+while placing the brief connection gap immediately after a measured block.
+
 This boundary is required by StratumStats: remote block observations affect
 scores only after the matching terminal record proves that the cohort uploaded
 without loss. An unexpected collector failure restarts the long-lived run with

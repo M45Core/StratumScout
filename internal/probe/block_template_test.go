@@ -123,6 +123,22 @@ func TestActiveBlockWindowsAreBounded(t *testing.T) {
 	}
 }
 
+func TestConnectionRefreshUsesNextCompletedBlockAfterMaximumAge(t *testing.T) {
+	eligible := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
+	if shouldRefreshConnections(eligible.Add(-time.Second), eligible, true, 0) {
+		t.Fatal("connections refreshed before reaching maximum age")
+	}
+	if shouldRefreshConnections(eligible, eligible, false, 0) {
+		t.Fatal("connections refreshed without a completed block")
+	}
+	if shouldRefreshConnections(eligible, eligible, true, 1) {
+		t.Fatal("connections refreshed while another block window was active")
+	}
+	if !shouldRefreshConnections(eligible, eligible, true, 0) {
+		t.Fatal("connections did not refresh at the first safe block boundary")
+	}
+}
+
 func TestBlockObservationsAreEmittedPerEndpointIncludingMisses(t *testing.T) {
 	started := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{
