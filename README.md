@@ -8,6 +8,11 @@ uploads authenticated results after each block.
 The probe is stateless. It cannot submit mining shares and has no listener,
 database, volume, or durable local state.
 
+Long-lived state is explicitly bounded. Upload buffering is capped at 2,000
+observations, no more than 32 active block windows are retained for 30 seconds,
+configured endpoint and session maps cannot exceed the validated endpoint list,
+and completed-block deduplication retains only the latest 256 block IDs.
+
 ## Operating modes
 
 By default, the process stays connected continuously. Each reporting cohort:

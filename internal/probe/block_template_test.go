@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"strconv"
 	"testing"
 	"time"
 
@@ -58,7 +59,7 @@ func TestFinalizedBlockCannotBeReopenedByLateJob(t *testing.T) {
 	}
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-	first := activeBlockForEvent(blocks, completed, configured, event{poolID: "first", connectionID: "first", prevHash: "block", at: started})
+	first := activeBlockForEvent(blocks, completed, configured, event{poolID: "first", connectionID: "first", prevHash: "block", at: started, verified: true})
 	if first == nil {
 		t.Fatal("initial block event did not open a window")
 	}
@@ -69,14 +70,56 @@ func TestFinalizedBlockCannotBeReopenedByLateJob(t *testing.T) {
 	}
 }
 
+func TestCompletedBlockDeduplicationIsBounded(t *testing.T) {
+	completed := map[string]bool{}
+	order := make([]string, 0, completedBlockLimit)
+	for index := 0; index < completedBlockLimit+10; index++ {
+		order = rememberCompletedBlock(completed, order, strconv.Itoa(index))
+	}
+	if len(completed) != completedBlockLimit || len(order) != completedBlockLimit {
+		t.Fatalf("completed=%d order=%d, want both capped at %d", len(completed), len(order), completedBlockLimit)
+	}
+	if completed["0"] {
+		t.Fatal("oldest completed block was not evicted")
+	}
+	newest := strconv.Itoa(completedBlockLimit + 9)
+	before := append([]string(nil), order...)
+	order = rememberCompletedBlock(completed, order, newest)
+	if len(completed) != completedBlockLimit || len(order) != completedBlockLimit {
+		t.Fatal("duplicate insertion changed bounded sizes")
+	}
+	for index := range order {
+		if order[index] != before[index] {
+			t.Fatal("duplicate insertion changed eviction order")
+		}
+	}
+}
+
 func TestEveryConfiguredEndpointRemainsEligibleWhileDisconnected(t *testing.T) {
 	configured := map[string]endpointTarget{
 		"plain": {poolID: "pool", address: "pool.example:3333"},
 		"tls":   {poolID: "pool", address: "pool.example:443", tls: true},
 	}
-	block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{poolID: "other", prevHash: "block", at: time.Now()})
+	block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{poolID: "other", prevHash: "block", at: time.Now(), verified: true})
 	if len(block.eligible) != 2 || block.eligible["plain"].address == "" || !block.eligible["tls"].tls {
 		t.Fatalf("eligible endpoints = %+v, want every configured endpoint", block.eligible)
+	}
+}
+
+func TestActiveBlockWindowsAreBounded(t *testing.T) {
+	blocks := map[string]*activeBlock{}
+	configured := map[string]endpointTarget{"pool": {poolID: "pool", address: "pool.example:3333"}}
+	for index := 0; index < activeBlockLimit; index++ {
+		event := event{prevHash: strconv.Itoa(index), at: time.Now(), verified: true}
+		if activeBlockForEvent(blocks, map[string]bool{}, configured, event) == nil {
+			t.Fatalf("valid window %d was rejected before the limit", index)
+		}
+	}
+	if block := activeBlockForEvent(blocks, map[string]bool{}, configured, event{prevHash: "overflow", at: time.Now(), verified: true}); block != nil {
+		t.Fatal("active block window limit was not enforced")
+	}
+	if block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{prevHash: "invalid", at: time.Now()}); block != nil {
+		t.Fatal("invalid template opened a new block window")
 	}
 }
 

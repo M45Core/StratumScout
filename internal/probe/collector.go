@@ -21,6 +21,8 @@ import (
 
 const (
 	blockWindow           = 30 * time.Second
+	activeBlockLimit      = 32
+	completedBlockLimit   = 256
 	maxStratumMessageSize = 256 << 10
 )
 
@@ -95,6 +97,7 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 
 	blocks := map[string]*activeBlock{}
 	completedBlocks := map[string]bool{}
+	completedBlockOrder := make([]string, 0, completedBlockLimit)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	finish := func(r *activeBlock) error {
@@ -134,12 +137,28 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 					if err := finish(r); err != nil {
 						return err
 					}
-					completedBlocks[id] = true
+					completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, id)
 					delete(blocks, id)
 				}
 			}
 		}
 	}
+}
+
+// rememberCompletedBlock bounds process-lifetime deduplication state. The
+// retained window covers roughly 42 hours at Bitcoin's target block interval,
+// while preventing a permanent Scout process from accumulating every block ID.
+func rememberCompletedBlock(completed map[string]bool, order []string, id string) []string {
+	if completed[id] {
+		return order
+	}
+	if len(order) == completedBlockLimit {
+		delete(completed, order[0])
+		copy(order, order[1:])
+		order = order[:len(order)-1]
+	}
+	completed[id] = true
+	return append(order, id)
 }
 
 func blockObservations(block *activeBlock, vantage string) []model.Observation {
@@ -191,6 +210,12 @@ func activeBlockForEvent(blocks map[string]*activeBlock, completed map[string]bo
 	}
 	if block := blocks[e.prevHash]; block != nil {
 		return block
+	}
+	// A new window needs at least one structurally valid template. Bound the
+	// number of simultaneous windows so hostile prev-hash churn cannot retain
+	// unbounded per-endpoint evidence during the 30-second collection period.
+	if !e.verified || len(blocks) >= activeBlockLimit {
+		return nil
 	}
 	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}, empty: map[string]bool{}, tls: map[string]bool{}, invalid: map[string]bool{}, payout: map[string]event{}}
 	for id, target := range configured {
