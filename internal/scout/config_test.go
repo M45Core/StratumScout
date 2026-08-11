@@ -30,8 +30,8 @@ func TestLoadConfig(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.CollectorURL.String() != "https://stats.example.com" || cfg.Vantage != "us-west" || cfg.RunFor != 30*time.Second || cfg.FilterContinents {
-		t.Fatalf("collector=%q vantage=%q duration=%s filter=%t", cfg.CollectorURL, cfg.Vantage, cfg.RunFor, cfg.FilterContinents)
+	if cfg.CollectorURL.String() != "https://stats.example.com" || cfg.Vantage != "us-west" || cfg.RunFor != 30*time.Second || cfg.Continuous || cfg.ProcessNice != 0 || cfg.FilterContinents {
+		t.Fatalf("collector=%q vantage=%q duration=%s continuous=%t nice=%d filter=%t", cfg.CollectorURL, cfg.Vantage, cfg.RunFor, cfg.Continuous, cfg.ProcessNice, cfg.FilterContinents)
 	}
 	if cfg.Client.CheckRedirect == nil || cfg.Client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
 		t.Fatal("collector redirects are not disabled")
@@ -52,6 +52,14 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Vantage != "us-east" {
 		t.Fatalf("Secaucus vantage=%q, want us-east", cfg.Vantage)
 	}
+	environment["FLY_REGION"] = "iad"
+	cfg, err = LoadConfig(func(key string) string { return environment[key] })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Vantage != "us-east" {
+		t.Fatalf("Ashburn vantage=%q, want us-east", cfg.Vantage)
+	}
 	environment["FLY_REGION"] = "ord"
 	if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
 		t.Fatal("unknown region accepted")
@@ -65,6 +73,20 @@ func TestLoadConfig(t *testing.T) {
 	environment["FILTER_CONTINENTS"] = "sometimes"
 	if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
 		t.Fatal("invalid continent filter accepted")
+	}
+	environment["FILTER_CONTINENTS"] = ""
+	environment["CONTINUOUS"] = "true"
+	environment["PROCESS_NICE"] = "10"
+	cfg, err = LoadConfig(func(key string) string { return environment[key] })
+	if err != nil || !cfg.Continuous || cfg.ProcessNice != 10 {
+		t.Fatalf("continuous config=%+v err=%v", cfg, err)
+	}
+	for key, value := range map[string]string{"CONTINUOUS": "sometimes", "PROCESS_NICE": "20"} {
+		environment := validEnvironment()
+		environment[key] = value
+		if _, err := LoadConfig(func(name string) string { return environment[name] }); err == nil {
+			t.Fatalf("invalid %s accepted", key)
+		}
 	}
 }
 

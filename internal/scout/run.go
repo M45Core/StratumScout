@@ -16,12 +16,53 @@ import (
 	"github.com/M45Core/StratumScout/internal/probe"
 )
 
+const (
+	continuousRestartDelay = time.Second
+	continuousRetryMax     = time.Minute
+)
+
 func Main(ctx context.Context) error {
 	cfg, err := LoadConfig(os.Getenv)
 	if err != nil {
 		return err
 	}
-	return Run(ctx, cfg)
+	if err := setProcessPriority(cfg.ProcessNice); err != nil {
+		return fmt.Errorf("set process priority: %w", err)
+	}
+	if !cfg.Continuous {
+		return Run(ctx, cfg)
+	}
+	return runContinuously(ctx, cfg, Run, continuousRestartDelay, continuousRetryMax)
+}
+
+func runContinuously(ctx context.Context, cfg Config, run func(context.Context, Config) error, restartDelay, retryMax time.Duration) error {
+	retryDelay := restartDelay
+	for {
+		err := run(ctx, cfg)
+		if ctx.Err() != nil {
+			return nil
+		}
+		delay := restartDelay
+		if err != nil {
+			log.Printf("probe run failed; retrying in %s", retryDelay)
+			delay = retryDelay
+			retryDelay *= 2
+			if retryDelay > retryMax {
+				retryDelay = retryMax
+			}
+		} else {
+			retryDelay = restartDelay
+		}
+		timer := time.NewTimer(delay)
+		select {
+		case <-ctx.Done():
+			if !timer.Stop() {
+				<-timer.C
+			}
+			return nil
+		case <-timer.C:
+		}
+	}
 }
 
 func Run(ctx context.Context, cfg Config) error {

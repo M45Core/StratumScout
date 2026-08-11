@@ -30,6 +30,7 @@ var regionVantages = map[string]string{
 	"lax": "us-west",
 	"dfw": "us-central",
 	"ewr": "us-east",
+	"iad": "us-east",
 	"fra": "europe",
 }
 
@@ -41,6 +42,8 @@ type Config struct {
 	Vantage          string
 	MachineID        string
 	RunFor           time.Duration
+	Continuous       bool
+	ProcessNice      int
 	FilterContinents bool
 	Client           *http.Client
 }
@@ -94,6 +97,20 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 	if runFor <= 0 || runFor > 14*time.Minute {
 		return Config{}, errors.New("RUN_FOR must be greater than zero and at most 14 minutes")
 	}
+	continuous := false
+	if raw := strings.TrimSpace(getenv("CONTINUOUS")); raw != "" {
+		continuous, err = strconv.ParseBool(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("CONTINUOUS: %w", err)
+		}
+	}
+	processNice := 0
+	if raw := strings.TrimSpace(getenv("PROCESS_NICE")); raw != "" {
+		processNice, err = strconv.Atoi(raw)
+		if err != nil || processNice < 0 || processNice > 19 {
+			return Config{}, errors.New("PROCESS_NICE must be an integer from 0 through 19")
+		}
+	}
 	filterContinents := false
 	if raw := strings.TrimSpace(getenv("FILTER_CONTINENTS")); raw != "" {
 		filterContinents, err = strconv.ParseBool(raw)
@@ -109,6 +126,8 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		Vantage:          vantage,
 		MachineID:        machineID,
 		RunFor:           runFor,
+		Continuous:       continuous,
+		ProcessNice:      processNice,
 		FilterContinents: filterContinents,
 		Client: &http.Client{
 			Timeout: 15 * time.Second,
