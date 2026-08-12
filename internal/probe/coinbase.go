@@ -17,6 +17,7 @@ const (
 )
 
 type coinbaseSummary struct {
+	BlockHeight      uint64
 	TotalSats        uint64
 	WorkerSats       uint64
 	WorkerWalletSeen bool
@@ -71,8 +72,16 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 		if scriptLen > uint64(len(raw)) {
 			return result, fmt.Errorf("input script too large")
 		}
-		if _, err := take(scriptLen); err != nil {
+		script, err := take(scriptLen)
+		if err != nil {
 			return result, err
+		}
+		if i == 0 {
+			if candidateHeight, ok := decodeCoinbaseHeight(script); ok && candidateHeight > 0 {
+				// mining.notify identifies the newly solved tip by its hash, while
+				// BIP34 encodes the height of the next candidate block.
+				result.BlockHeight = candidateHeight - 1
+			}
 		}
 		if _, err := take(4); err != nil {
 			return result, err
@@ -186,6 +195,21 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 		result.OutputsTruncated = true
 	}
 	return result, nil
+}
+
+func decodeCoinbaseHeight(script []byte) (uint64, bool) {
+	if len(script) < 2 {
+		return 0, false
+	}
+	size := int(script[0])
+	if size < 1 || size > 5 || len(script) < size+1 || script[size]&0x80 != 0 {
+		return 0, false
+	}
+	var height uint64
+	for index := 0; index < size; index++ {
+		height |= uint64(script[index+1]) << (8 * index)
+	}
+	return height, height > 0
 }
 
 func retainedScriptHex(script []byte) (string, bool) {

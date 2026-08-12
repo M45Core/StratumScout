@@ -83,6 +83,7 @@ type Observation struct {
 	ObservedAt               time.Time        `json:"observed_at"`
 	Vantage                  string           `json:"vantage"`
 	BlockID                  string           `json:"block_id"`
+	BlockHeight              uint64           `json:"block_height,omitempty"`
 	PoolID                   string           `json:"pool_id"`
 	Eligible                 bool             `json:"eligible"`
 	Arrived                  bool             `json:"arrived"`
@@ -164,9 +165,11 @@ type Snapshot struct {
 	LatencyWindowHours      int          `json:"latency_window_hours"`
 	RetentionWindowDays     int          `json:"retention_window_days"`
 	LatestBlockID           string       `json:"latest_block_id,omitempty"`
+	LatestBlockHeight       uint64       `json:"latest_block_height,omitempty"`
 	BlocksObserved          int          `json:"blocks_observed"`
 	EligibleEndpointSamples int          `json:"eligible_endpoint_samples"`
 	TemplateDeliveries      int          `json:"template_deliveries"`
+	ExcludedRegionalCohorts int          `json:"excluded_regional_cohorts"`
 	Reports                 []PoolReport `json:"reports"`
 	Disclosure              []string     `json:"disclosure"`
 }

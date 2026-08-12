@@ -25,6 +25,7 @@ type Verification struct {
 	Valid                    bool
 	Errors                   []string
 	MerkleRoot               string
+	BlockHeight              uint64
 	CoinbaseAnalyzed         bool
 	WorkerWalletSeen         bool
 	CoinbaseTotalSats        uint64
@@ -83,6 +84,7 @@ func VerifyJob(j Job) Verification {
 		errs = append(errs, "reconstructed coinbase is implausibly short")
 	}
 	var root string
+	var blockHeight uint64
 	var coinbaseAnalyzed, workerWalletSeen bool
 	var coinbaseTotalSats, workerPayoutSats, coinbaseOmittedSats uint64
 	var coinbaseOutputs []model.CoinbaseOutput
@@ -95,6 +97,7 @@ func VerifyJob(j Job) Verification {
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("coinbase transaction: %v", err))
 		} else {
+			blockHeight = summary.BlockHeight
 			coinbaseAnalyzed = true
 			workerWalletSeen = summary.WorkerWalletSeen
 			coinbaseTotalSats = summary.TotalSats
@@ -114,7 +117,7 @@ func VerifyJob(j Job) Verification {
 		}
 		root = hex.EncodeToString(hash)
 	}
-	return Verification{Valid: len(errs) == 0, Errors: errs, MerkleRoot: root, CoinbaseAnalyzed: coinbaseAnalyzed, WorkerWalletSeen: workerWalletSeen, CoinbaseTotalSats: coinbaseTotalSats, WorkerPayoutSats: workerPayoutSats, CoinbaseOutputs: coinbaseOutputs, CoinbaseOutputCount: coinbaseOutputCount, CoinbaseOutputsTruncated: coinbaseOutputsTruncated, CoinbaseOmittedSats: coinbaseOmittedSats, EstimatedPoolFeePct: estimatedPoolFeePct}
+	return Verification{Valid: len(errs) == 0, Errors: errs, MerkleRoot: root, BlockHeight: blockHeight, CoinbaseAnalyzed: coinbaseAnalyzed, WorkerWalletSeen: workerWalletSeen, CoinbaseTotalSats: coinbaseTotalSats, WorkerPayoutSats: workerPayoutSats, CoinbaseOutputs: coinbaseOutputs, CoinbaseOutputCount: coinbaseOutputCount, CoinbaseOutputsTruncated: coinbaseOutputsTruncated, CoinbaseOmittedSats: coinbaseOmittedSats, EstimatedPoolFeePct: estimatedPoolFeePct}
 }
 
 func doubleSHA256(data []byte) []byte {

@@ -7,7 +7,7 @@ import (
 
 func TestVerifyJob(t *testing.T) {
 	workerScript, _ := hex.DecodeString("76a914111111111111111111111111111111111111111188ac")
-	coinbase1 := "0100000001" + zeroHex(32) + "ffffffff0900"
+	coinbase1 := "0100000001" + zeroHex(32) + "ffffffff0c03a1bb0d"
 	coinbase2 := "ffffffff01" + "00f2052a01000000" + "19" + hex.EncodeToString(workerScript) + "00000000"
 	j := Job{PrevHash: zeroHex(32), Coinbase1: coinbase1, Coinbase2: coinbase2, MerkleBranches: []string{zeroHex(32)}, Version: "20000000", Bits: "17034219", NTime: "66ad0000", ExtraNonce1: "01020304", ExtraNonce2Size: 4, WorkerScript: workerScript}
 	v := VerifyJob(j)
@@ -16,6 +16,9 @@ func TestVerifyJob(t *testing.T) {
 	}
 	if len(v.MerkleRoot) != 64 {
 		t.Fatalf("root=%q", v.MerkleRoot)
+	}
+	if v.BlockHeight != 900_000 {
+		t.Fatalf("block height=%d, want 900000", v.BlockHeight)
 	}
 	if !v.CoinbaseAnalyzed || !v.WorkerWalletSeen || v.EstimatedPoolFeePct == nil || *v.EstimatedPoolFeePct != 0 {
 		t.Fatalf("payout verification=%+v", v)

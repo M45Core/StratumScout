@@ -49,6 +49,7 @@ type event struct {
 	hasTransactions, tls     bool
 	verified                 bool
 	coinbaseAnalyzed         bool
+	blockHeight              uint64
 	workerWalletSeen         bool
 	coinbaseTotalSats        uint64
 	workerPayoutSats         uint64
@@ -197,8 +198,8 @@ func blockObservations(block *activeBlock, vantage string) []model.Observation {
 	for _, id := range ids {
 		target := block.eligible[id]
 		at, arrived := block.arrivals[id]
-		observation := model.Observation{Version: model.ObservationVersion, ObservedAt: block.started.UTC(), Vantage: vantage, BlockID: block.id, PoolID: target.poolID, Endpoint: target.address, Eligible: true, Arrived: arrived, EmptyFirst: block.empty[id], TLS: target.tls}
 		payout := block.payout[id]
+		observation := model.Observation{Version: model.ObservationVersion, ObservedAt: block.started.UTC(), Vantage: vantage, BlockID: block.id, BlockHeight: payout.blockHeight, PoolID: target.poolID, Endpoint: target.address, Eligible: true, Arrived: arrived, EmptyFirst: block.empty[id], TLS: target.tls}
 		observation.CoinbaseAnalyzed = payout.coinbaseAnalyzed
 		observation.WorkerWalletInCoinbase = payout.workerWalletSeen
 		observation.CoinbaseTotalSats = payout.coinbaseTotalSats
@@ -473,7 +474,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		job.Bits, _ = msg.Params[6].(string)
 		job.NTime, _ = msg.Params[7].(string)
 		verification := VerifyJob(job)
-		e := event{poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS), prevHash: prev, at: time.Now(), hasTransactions: len(branches) > 0, tls: endpoint.TLS, verified: verification.Valid, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
+		e := event{poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS), prevHash: prev, at: time.Now(), hasTransactions: len(branches) > 0, tls: endpoint.TLS, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
 		select {
 		case out <- e:
 		case <-ctx.Done():
