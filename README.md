@@ -20,7 +20,8 @@ By default, the process stays connected continuously. Each reporting cohort:
 1. fetches the current collector configuration and establishes pool connections
    once at process startup;
 2. assigns a random identifier to the current reporting cohort;
-3. observes until a block transition is detected;
+3. observes until a block transition is detected and decodes its BIP34 coinbase
+   height when present;
 4. keeps the block window open for 30 seconds from the first observation;
 5. flushes block observations and publishes one terminal run record; and
 6. rotates only the reporting run ID while the process and pool connections
@@ -38,6 +39,11 @@ scores only after the matching terminal record proves that the cohort uploaded
 without loss. An unexpected collector failure restarts the long-lived run with
 exponential backoff capped at one minute. `SIGINT` and `SIGTERM` stop the
 process.
+
+Each uploaded block observation carries the decoded Bitcoin height when the
+coinbase input contains a valid BIP34 height. StratumStats uses that value for
+the selected region's block-height indicator; Scout does not query a separate
+Bitcoin node for chain-tip state.
 
 ## Configuration
 
