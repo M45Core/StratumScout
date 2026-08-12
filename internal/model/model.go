@@ -110,16 +110,20 @@ type Observation struct {
 }
 
 type PoolReport struct {
-	PoolID                            string               `json:"pool_id"`
-	PoolName                          string               `json:"pool_name"`
-	Endpoint                          string               `json:"endpoint"`
-	EndpointTLS                       bool                 `json:"endpoint_tls"`
-	EndpointRegion                    string               `json:"endpoint_region,omitempty"`
-	LastObservedAt                    *time.Time           `json:"last_observed_at,omitempty"`
-	Category                          string               `json:"category,omitempty"`
-	Products                          []string             `json:"products,omitempty"`
+	PoolID         string     `json:"pool_id"`
+	PoolName       string     `json:"pool_name"`
+	Endpoint       string     `json:"endpoint"`
+	EndpointTLS    bool       `json:"endpoint_tls"`
+	EndpointRegion string     `json:"endpoint_region,omitempty"`
+	LastObservedAt *time.Time `json:"last_observed_at,omitempty"`
+	Category       string     `json:"category,omitempty"`
+	Products       []string   `json:"products,omitempty"`
+	// Blocks and Arrivals count unique Bitcoin blocks in a combined-vantage
+	// report. EligibleChecks and DeliveryChecks retain the regional sample totals.
 	Blocks                            int                  `json:"blocks"`
 	Arrivals                          int                  `json:"arrivals"`
+	EligibleChecks                    int                  `json:"eligible_checks"`
+	DeliveryChecks                    int                  `json:"delivery_checks"`
 	MedianMS                          *float64             `json:"median_ms"`
 	P95MS                             *float64             `json:"p95_ms"`
 	EstimatedMiningLossPct            *float64             `json:"estimated_mining_loss_pct"`
@@ -159,6 +163,7 @@ type Snapshot struct {
 	Methodology             string       `json:"methodology_version"`
 	LatencyWindowHours      int          `json:"latency_window_hours"`
 	RetentionWindowDays     int          `json:"retention_window_days"`
+	LatestBlockID           string       `json:"latest_block_id,omitempty"`
 	BlocksObserved          int          `json:"blocks_observed"`
 	EligibleEndpointSamples int          `json:"eligible_endpoint_samples"`
 	TemplateDeliveries      int          `json:"template_deliveries"`

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 repo_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+regions_file="$repo_dir/internal/model/regions.json"
 app=""
 apply=false
 start=false
@@ -21,7 +22,7 @@ Options:
   -h, --help  Show this help.
 
 The script requires exactly one Machine in each configured region, permits only
-lax, dfw, ewr, and fra, and refuses public IPs, services, mounts, standby
+iad, fra, lax, nrt, and sin, and refuses public IPs, services, mounts, standby
 Machines, non-hourly schedules, or restart policies other than no.
 EOF
 }
@@ -78,20 +79,22 @@ done
 "$fly_cmd" auth whoami >/dev/null
 machines="$("$fly_cmd" machine list --app "$app" --json)"
 machine_count="$(jq 'length' <<<"$machines")"
-if [[ "$machine_count" -ne 4 ]]; then
-  echo "Expected exactly four Machines; found $machine_count. Refusing update." >&2
+expected_regions="$(jq -r '[.[] | select(.enabled) | .code] | sort | join(" ")' "$regions_file")"
+region_count="$(jq '[.[] | select(.enabled)] | length' "$regions_file")"
+if [[ "$machine_count" -ne "$region_count" ]]; then
+  echo "Expected exactly $region_count Machines; found $machine_count. Refusing update." >&2
   exit 1
 fi
 
-inventory_errors="$(jq -r '
+inventory_errors="$(jq -r --slurpfile registry "$regions_file" '
   group_by(.region)[] |
-  select(length != 1 or ([.[].region] | all(. == "lax" or . == "dfw" or . == "ewr" or . == "fra") | not)) |
+  select(length != 1 or (.[0].region as $region | any($registry[0][]; .enabled and .code == $region) | not)) |
   "invalid region inventory: " + (map(.region) | join(","))
 ' <<<"$machines")"
 regions="$(jq -r 'map(.region) | sort | join(" ")' <<<"$machines")"
-if [[ -n "$inventory_errors" || "$regions" != "dfw ewr fra lax" ]]; then
+if [[ -n "$inventory_errors" || "$regions" != "$expected_regions" ]]; then
   [[ -z "$inventory_errors" ]] || echo "$inventory_errors" >&2
-  echo "Expected exactly one Machine in each of dfw, ewr, fra, and lax; found: $regions" >&2
+  echo "Expected exactly one Machine in each enabled registry region ($expected_regions); found: $regions" >&2
   exit 1
 fi
 
@@ -121,7 +124,7 @@ if [[ "$(jq 'length' <<<"$ips")" -ne 0 ]]; then
 fi
 
 commit="$(git -C "$repo_dir" rev-parse --short=12 HEAD)"
-echo "Validated app $app: one safe hourly Machine in each of dfw, ewr, fra, and lax."
+echo "Validated app $app: one safe hourly Machine in each enabled registry region ($expected_regions)."
 echo "Image tag: registry.fly.io/$app:$commit"
 if [[ "$apply" != true ]]; then
   echo "Dry run; no Fly resources were changed. Rerun with --apply after review."
@@ -169,5 +172,5 @@ if [[ "$start" == true ]]; then
   done < <(jq -r 'sort_by(.region)[].id' <<<"$updated")
   echo "Started one validation run in every region. Follow with: $fly_cmd logs --app $app"
 else
-  echo "Updated all four Machines. They will start on their hourly schedules."
+  echo "Updated all $region_count Machines. They will start on their hourly schedules."
 fi

@@ -9,7 +9,7 @@ if [[ ! -d "$stats_dir/internal/model" ]]; then
   exit 1
 fi
 
-model_files=(model.go protocol.go version.go observation_json.go observation_json_test.go)
+model_files=(model.go protocol.go version.go regions.go regions.json observation_json.go observation_json_test.go)
 for file in "${model_files[@]}"; do
   diff -u "$stats_dir/internal/model/$file" "$scout_dir/internal/model/$file"
 done

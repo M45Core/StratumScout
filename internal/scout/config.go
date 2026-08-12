@@ -26,14 +26,6 @@ const (
 	maxProbeEndpoints   = 256
 )
 
-var regionVantages = map[string]string{
-	"lax": "us-west",
-	"dfw": "us-central",
-	"ewr": "us-east",
-	"iad": "us-east",
-	"fra": "europe",
-}
-
 type Config struct {
 	CollectorURL     *url.URL
 	KeyID            string
@@ -79,10 +71,11 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("INGEST_KEY_ID and an INGEST_SECRET of at least 32 bytes are required")
 	}
 	region := strings.TrimSpace(getenv("FLY_REGION"))
-	vantage, ok := regionVantages[region]
+	productionRegion, ok := model.ProductionRegionForCode(region)
 	if !ok {
 		return Config{}, errors.New("unsupported FLY_REGION")
 	}
+	vantage := productionRegion.Vantage
 	machineID := strings.TrimSpace(getenv("FLY_MACHINE_ID"))
 	if !validID(machineID, 128) {
 		return Config{}, errors.New("FLY_MACHINE_ID is required")
@@ -239,6 +232,9 @@ func validEndpointHost(host string) bool {
 }
 
 func continentForVantage(vantage string) string {
+	if region, ok := model.ProductionRegionForVantage(vantage); ok {
+		return region.Continent
+	}
 	switch vantage {
 	case "us-west", "us-central", "us-east":
 		return "north-america"

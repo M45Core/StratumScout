@@ -1,0 +1,20 @@
+[
+  {"code":"ams","city":"Amsterdam","country":"Netherlands","gateway":true,"enabled":false},
+  {"code":"arn","city":"Stockholm","country":"Sweden","gateway":true,"enabled":false},
+  {"code":"bom","city":"Mumbai","country":"India","gateway":true,"enabled":false},
+  {"code":"cdg","city":"Paris","country":"France","gateway":true,"enabled":false},
+  {"code":"dfw","city":"Dallas","country":"United States","gateway":true,"enabled":false},
+  {"code":"ewr","city":"Secaucus","country":"United States","gateway":true,"enabled":false},
+  {"code":"fra","city":"Frankfurt","country":"Germany","gateway":true,"enabled":true,"vantage":"europe","label":"FRA","continent":"europe","order":2},
+  {"code":"gru","city":"Sao Paulo","country":"Brazil","gateway":false,"enabled":false},
+  {"code":"iad","city":"Ashburn","country":"United States","gateway":true,"enabled":true,"vantage":"us-east","label":"IAD","continent":"north-america","order":1},
+  {"code":"jnb","city":"Johannesburg","country":"South Africa","gateway":false,"enabled":false},
+  {"code":"lax","city":"Los Angeles","country":"United States","gateway":true,"enabled":true,"vantage":"us-west","label":"LAX","continent":"north-america","order":3},
+  {"code":"lhr","city":"London","country":"United Kingdom","gateway":true,"enabled":false},
+  {"code":"nrt","city":"Tokyo","country":"Japan","gateway":true,"enabled":true,"vantage":"japan","label":"NRT","continent":"asia","order":4},
+  {"code":"ord","city":"Chicago","country":"United States","gateway":true,"enabled":false},
+  {"code":"sin","city":"Singapore","country":"Singapore","gateway":true,"enabled":true,"vantage":"singapore","label":"SIN","continent":"asia","order":5},
+  {"code":"sjc","city":"San Jose","country":"United States","gateway":true,"enabled":false},
+  {"code":"syd","city":"Sydney","country":"Australia","gateway":true,"enabled":false},
+  {"code":"yyz","city":"Toronto","country":"Canada","gateway":true,"enabled":false}
+]

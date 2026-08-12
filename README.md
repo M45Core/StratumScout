@@ -53,8 +53,11 @@ process.
 | `PROCESS_NICE` | no | `0` | Linux scheduler niceness from 0 through 19 |
 | `FILTER_CONTINENTS` | no | `false` | Skip endpoints explicitly assigned to another continent |
 
-Supported Fly mappings are `lax` to `us-west`, `dfw` to `us-central`, `iad`
-and `ewr` to `us-east`, and `fra` to `europe`.
+Supported Fly mappings are `iad` to `us-east`, `fra` to `europe`, `lax` to
+`us-west`, `nrt` to `japan`, and `sin` to `singapore`.
+The embedded [`regions.json`](internal/model/regions.json) is synchronized with
+StratumStats and controls which `FLY_REGION` values are accepted. Disabled
+catalog entries remain documented but cannot upload measurements.
 
 `PROCESS_NICE=10` is the recommended setting when Scout shares a Fly Machine
 with a latency-sensitive BTCFlux edge. BTCFlux remains at its normal priority;
@@ -75,8 +78,8 @@ secret set.
 ## BTCFlux co-location
 
 The production co-location layout uses independent scratch-based BTCFlux and
-StratumScout images inside one 256 MiB Fly Machine in each of `iad`, `dfw`,
-`lax`, and `fra`. Fly Pilot supplies the multi-container init; neither runtime
+StratumScout images inside one 256 MiB Fly Machine in each of `iad`, `fra`,
+`lax`, `nrt`, and `sin`. Fly Pilot supplies the multi-container init; neither runtime
 image contains Alpine or a shell.
 
 The complete build, migration, validation, upgrade, and rollback procedure is

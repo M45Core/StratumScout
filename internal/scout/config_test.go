@@ -36,29 +36,27 @@ func TestLoadConfig(t *testing.T) {
 	if cfg.Client.CheckRedirect == nil || cfg.Client.CheckRedirect(nil, nil) != http.ErrUseLastResponse {
 		t.Fatal("collector redirects are not disabled")
 	}
-	environment["FLY_REGION"] = "fra"
-	cfg, err = LoadConfig(func(key string) string { return environment[key] })
-	if err != nil {
-		t.Fatal(err)
+	for region, vantage := range map[string]string{
+		"iad": "us-east",
+		"fra": "europe",
+		"lax": "us-west",
+		"nrt": "japan",
+		"sin": "singapore",
+	} {
+		environment["FLY_REGION"] = region
+		cfg, err = LoadConfig(func(key string) string { return environment[key] })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.Vantage != vantage {
+			t.Fatalf("%s vantage=%q, want %q", region, cfg.Vantage, vantage)
+		}
 	}
-	if cfg.Vantage != "europe" {
-		t.Fatalf("Frankfurt vantage=%q, want europe", cfg.Vantage)
-	}
-	environment["FLY_REGION"] = "ewr"
-	cfg, err = LoadConfig(func(key string) string { return environment[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Vantage != "us-east" {
-		t.Fatalf("Secaucus vantage=%q, want us-east", cfg.Vantage)
-	}
-	environment["FLY_REGION"] = "iad"
-	cfg, err = LoadConfig(func(key string) string { return environment[key] })
-	if err != nil {
-		t.Fatal(err)
-	}
-	if cfg.Vantage != "us-east" {
-		t.Fatalf("Ashburn vantage=%q, want us-east", cfg.Vantage)
+	for _, retired := range []string{"dfw", "ewr"} {
+		environment["FLY_REGION"] = retired
+		if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
+			t.Fatalf("retired region %s accepted", retired)
+		}
 	}
 	environment["FLY_REGION"] = "ord"
 	if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
@@ -128,6 +126,14 @@ func TestFetchProbeConfig(t *testing.T) {
 	}
 	if len(europePools) != 1 || len(europePools[0].Endpoints) != 2 || europePools[0].Endpoints[0].Host != "eu.example" || europePools[0].Endpoints[1].Host != "global.example" {
 		t.Fatalf("Europe pools=%+v", europePools)
+	}
+	asianCfg := Config{CollectorURL: collectorURL, Vantage: "japan", FilterContinents: true, Client: server.Client()}
+	_, asianPools, err := fetchProbeConfig(context.Background(), asianCfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(asianPools) != 1 || len(asianPools[0].Endpoints) != 1 || asianPools[0].Endpoints[0].Host != "global.example" {
+		t.Fatalf("Asia pools=%+v", asianPools)
 	}
 }
 
