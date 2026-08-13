@@ -9,64 +9,95 @@ import (
 )
 
 type identityPreset struct {
-	agents []string
-	worker string
+	agents  []string
+	worker  string
+	weight  int
+	profile workerProfile
 }
+
+type workerProfile uint8
+
+const (
+	workerProfileHome workerProfile = iota
+	workerProfileIndustrial
+	workerProfileRental
+)
 
 // Keep each Stratum user agent coupled to a plausible hardware worker name.
 // These strings follow the mining.subscribe formats emitted by the respective
 // firmware; several pools use them to select compatibility workarounds.
 var identityPresets = []identityPreset{
-	{agents: axeAgents("BM1397"), worker: "bitaxe-max"},
-	{agents: axeAgents("BM1366"), worker: "bitaxe-ultra"},
-	{agents: axeAgents("BM1366"), worker: "bitaxe-hex"},
-	{agents: axeAgents("BM1368"), worker: "bitaxe-supra"},
-	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma"},
-	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma-duo"},
-	{agents: axeAgents("BM1368"), worker: "bitaxe-supra-hex"},
-	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma-turbo"},
-	{agents: nerdAgents("NerdAxe", "BM1366"), worker: "nerdaxe"},
-	{agents: nerdAgents("NerdAxe", "BM1370"), worker: "nerdaxe-gamma"},
-	{agents: nerdAgents("NerdQAxe+", "BM1368"), worker: "nerdqaxe-plus"},
-	{agents: nerdAgents("NerdQAxe++", "BM1370"), worker: "nerdqaxe-plusplus"},
-	{agents: nerdAgents("NerdOCTAXE-γ", "BM1370"), worker: "nerdoctaxe-gamma"},
-	{agents: nerdAgents("NerdQX", "BM1370"), worker: "nerdqx"},
-	{agents: nerdAgents("NerdEKO", "BM1370"), worker: "nerdeko"},
-	{agents: []string{"NerdHaxe-γ/BM1370/v2.3.0"}, worker: "nerdhaxe-gamma"},
-	{agents: []string{"Q1370/BM1370/v2.3.0"}, worker: "q1370"},
-	{agents: []string{"Q1373/BM1373/v2.3.0"}, worker: "q1373"},
-	{agents: []string{"cgminer/4.9.2", "cgminer/4.10.0", "cgminer/4.11.0", "cgminer/4.11.1"}, worker: "avalon-nano-3s"},
-	{agents: []string{"bfgminer/5.4.2", "bfgminer/5.5.0"}, worker: "futurebit-apollo"},
-	{agents: []string{"Antminer"}, worker: "antminer-s21"},
-	{agents: []string{"bmminer/2.0"}, worker: "antminer-s19-pro"},
-	{agents: []string{"bosminer/23.08", "bosminer/24.04", "bosminer/24.09", "bosminer/25.05", "bosminer/26.06"}, worker: "antminer-s19-braiins"},
-	{agents: []string{"whatsminer/v1.0"}, worker: "whatsminer-m60s"},
-	{agents: []string{"xminer-1.0"}, worker: "antminer-s21-vnish"},
-	{agents: []string{"PowerPlay-BM/1.0"}, worker: "epic-blockminer"},
-	{agents: []string{"NiceHash/1.0.0"}, worker: "nicehash-sha256"},
-	{agents: []string{"LuckyMiner"}, worker: "luckyminer-lv07"},
-	{agents: []string{"bitforge/BM1370/v1.0", "bitforge/BM1370/v1.5", "bitforge/BM1370/v1.6"}, worker: "bitforge-nano"},
-	{agents: []string{"Zyber8S/v2.11.8-Zyber"}, worker: "zyber8s"},
-	{agents: []string{"Zyber8G/v2.11.8-Zyber"}, worker: "zyber8g"},
-	{agents: []string{"NMAxe/0.1.0", "NMAxe/v3.1.01", "NMAxe/v3.1.02"}, worker: "nmaxe"},
-	{agents: []string{"bitdsk/E1"}, worker: "bitdsk-e1"},
-	{agents: []string{"bitdsk/S1"}, worker: "bitdsk-s1"},
-	{agents: []string{"mujina-miner/0.1.0-alpha"}, worker: "ember-one"},
-	{agents: []string{"apollo"}, worker: "futurebit-apollo"},
+	{agents: axeAgents("BM1397"), worker: "bitaxe-max", weight: 2},
+	{agents: axeAgents("BM1366"), worker: "bitaxe-ultra", weight: 4},
+	{agents: axeAgents("BM1366"), worker: "bitaxe-hex", weight: 4},
+	{agents: axeAgents("BM1368"), worker: "bitaxe-supra", weight: 8},
+	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma", weight: 40},
+	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma-duo", weight: 10},
+	{agents: axeAgents("BM1368"), worker: "bitaxe-supra-hex", weight: 8},
+	{agents: axeAgents("BM1370"), worker: "bitaxe-gamma-turbo", weight: 24},
+	{agents: nerdAgents("NerdAxe", "BM1366"), worker: "nerdaxe", weight: 3},
+	{agents: nerdAgents("NerdAxe", "BM1370"), worker: "nerdaxe-gamma", weight: 5},
+	{agents: nerdAgents("NerdQAxe+", "BM1368"), worker: "nerdqaxe-plus", weight: 5},
+	{agents: nerdAgents("NerdQAxe++", "BM1370"), worker: "nerdqaxe-plusplus", weight: 20},
+	{agents: nerdAgents("NerdOCTAXE-γ", "BM1370"), worker: "nerdoctaxe-gamma", weight: 10},
+	{agents: nerdAgents("NerdQX", "BM1370"), worker: "nerdqx", weight: 3},
+	{agents: nerdAgents("NerdEKO", "BM1370"), worker: "nerdeko", weight: 2},
+	{agents: []string{"NerdHaxe-γ/BM1370/v2.3.0"}, worker: "nerdhaxe-gamma", weight: 1},
+	{agents: []string{"Q1370/BM1370/v2.3.0"}, worker: "q1370", weight: 1},
+	{agents: []string{"Q1373/BM1373/v2.3.0"}, worker: "q1373", weight: 2},
+	{agents: weightedVersionedAgents("cgminer/", []versionWeight{{"4.9.2", 1}, {"4.10.0", 1}, {"4.11.0", 1}, {"4.11.1", 17}}), worker: "avalon-nano-3s", weight: 22},
+	{agents: weightedVersionedAgents("bfgminer/", []versionWeight{{"5.4.2", 1}, {"5.5.0", 4}}), worker: "futurebit-apollo", weight: 1},
+	{agents: []string{"Antminer", "Antminer S21/Thu Oct  9 17:56:18 CST 2025"}, worker: "antminer-s21", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{"bmminer/2.0", "bmminer/4.11.1 rwglr"}, worker: "antminer-s19-pro", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{
+		"2022-09-27-0-26ba61b9-22.08.1-plus;bosminer-plus-am1-s9 0.9.0-26ba61b9",
+		"2024-07-12-0-fc9fe388-24.06-plus;bosminer-plus-tuner 0.9.0-fc9fe388",
+		"2026-05-27-0-db3ed535-26.06-plus;bosminer-plus-tuner 0.9.0-db3ed535",
+		"2026-07-07-0-c5a2978a-26.07-plus;bosminer-plus-tuner 0.9.0-c5a2978a",
+	}, worker: "antminer-s19-braiins", weight: 2, profile: workerProfileIndustrial},
+	{agents: []string{"whatsminer/v1.0"}, worker: "whatsminer-m60s", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{"xminer-1.0", "xminer-1.2.7", "xminer-1.2.7"}, worker: "antminer-s21-vnish", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{"PowerPlay-BM/1.0", "PowerPlay-BMS/1.24.0", "PowerPlay-BMS/1.24.0"}, worker: "epic-blockminer", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{"NiceHash/1.0.0"}, worker: "nicehash-sha256", weight: 1, profile: workerProfileRental},
+	{agents: []string{"LuckyMiner", "LuckyMiner/BM1366/1.0.0", "LuckyMiner/BM1366/1.1.0", "LuckyMiner/BM1366/1.2.0", "LuckyMiner/BM1366/1.2.0"}, worker: "luckyminer-lv07", weight: 2},
+	{agents: weightedVersionedAgents("bitforge/BM1370/", []versionWeight{{"v1.0", 3}, {"v1.5", 2}, {"v1.6", 5}}), worker: "bitforge-nano", weight: 3},
+	{agents: []string{"Zyber8S/v2.11.8-Zyber"}, worker: "zyber8s", weight: 1},
+	{agents: []string{"Zyber8G/v2.11.8-Zyber"}, worker: "zyber8g", weight: 1},
+	{agents: weightedVersionedAgents("NMAxe/", []versionWeight{{"v2.8.02", 1}, {"v3.0.10", 1}, {"v3.0.20", 1}, {"v3.0.21", 2}, {"v3.1.01", 3}, {"v3.1.02", 4}}), worker: "nmaxe", weight: 2},
+	{agents: []string{"bitdsk/E1"}, worker: "bitdsk-e1", weight: 1},
+	{agents: []string{"bitdsk/S1"}, worker: "bitdsk-s1", weight: 1},
+	{agents: []string{"mujina-miner/0.1.0-alpha"}, worker: "ember-one", weight: 1, profile: workerProfileIndustrial},
+	{agents: []string{"apollo", "apollo-miner 2.0.3 2025-03-19, msp ver 0xd167"}, worker: "futurebit-apollo", weight: 1},
 }
 
 func axeAgents(asic string) []string {
-	return versionedAgents("bitaxe/"+asic+"/", []string{"v2.10.1", "v2.11.0", "v2.12.2", "v2.13.1", "v2.13.2", "v2.14.0", "v2.14.1", "v2.14.2"})
+	return weightedVersionedAgents("bitaxe/"+asic+"/", []versionWeight{
+		{"v2.10.1", 1}, {"v2.11.0", 1}, {"v2.12.2", 2}, {"v2.13.1", 4},
+		{"v2.13.2", 1}, {"v2.14.0", 2}, {"v2.14.1", 3}, {"v2.14.2", 6},
+	})
 }
 
 func nerdAgents(device, asic string) []string {
-	return versionedAgents(device+"/"+asic+"/", []string{"1.0.37", "1.0.37.1", "1.0.37.2-LTS"})
+	return weightedVersionedAgents(device+"/"+asic+"/", []versionWeight{
+		{"v1.0.35", 1}, {"v1.0.36", 3}, {"v1.0.37.1", 3}, {"V1.0.37.2-LTS", 7},
+	})
 }
 
-func versionedAgents(prefix string, versions []string) []string {
-	agents := make([]string, len(versions))
-	for i, version := range versions {
-		agents[i] = prefix + version
+type versionWeight struct {
+	version string
+	weight  int
+}
+
+func weightedVersionedAgents(prefix string, versions []versionWeight) []string {
+	count := 0
+	for _, version := range versions {
+		count += version.weight
+	}
+	agents := make([]string, 0, count)
+	for _, version := range versions {
+		for range version.weight {
+			agents = append(agents, prefix+version.version)
+		}
 	}
 	return agents
 }
@@ -112,10 +143,24 @@ var workerNicknameNouns = []string{
 var workerMiningPrefixes = []string{"hash", "block", "solo", "coin", "btc", "bitcoin", "satoshi"}
 var workerMiningSuffixes = []string{"rig", "miner", "node", "box", "lab", "farm", "works", "forge", "hunter"}
 
+var industrialWorkerRoots = []string{
+	"worker", "miner", "asic", "unit", "machine", "rack", "row", "shelf",
+	"site", "farm", "hall", "pod", "zone", "line", "primary", "backup",
+}
+
+var industrialLocationPrefixes = []string{"rack", "row", "shelf", "site", "farm", "hall", "pod", "zone", "line"}
+var industrialRoleSuffixes = []string{"miner", "asic", "unit", "node", "rig"}
+
+var rentalWorkerRoots = []string{
+	"rental", "order", "job", "contract", "hashpower", "buyer", "market",
+	"primary", "backup", "worker", "rig",
+}
+
 type Identity struct {
 	Username     string
 	Agent        string
 	PayoutScript []byte
+	wireStyle    stratumWireStyle
 }
 
 func RandomIdentity() (Identity, error) {
@@ -131,7 +176,7 @@ func RandomIdentity() (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	worker, err := randomWorkerName(preset.worker)
+	worker, err := randomWorkerName(preset.worker, preset.profile)
 	if err != nil {
 		return Identity{}, err
 	}
@@ -145,15 +190,42 @@ func RandomIdentity() (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return Identity{Username: username, Agent: agent, PayoutScript: payoutScript}, nil
+	return Identity{Username: username, Agent: agent, PayoutScript: payoutScript, wireStyle: stratumWireStyleForAgent(agent)}, nil
+}
+
+type stratumWireStyle uint8
+
+const (
+	stratumWireCompact stratumWireStyle = iota
+	stratumWireSpaced
+)
+
+func stratumWireStyleForAgent(agent string) stratumWireStyle {
+	for _, prefix := range []string{"Nerd", "Q137", "NMAxe", "NMQAxe"} {
+		if strings.HasPrefix(agent, prefix) {
+			return stratumWireSpaced
+		}
+	}
+	return stratumWireCompact
 }
 
 func randomPreset() (identityPreset, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(len(identityPresets))))
+	totalWeight := 0
+	for _, preset := range identityPresets {
+		totalWeight += preset.weight
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(totalWeight)))
 	if err != nil {
 		return identityPreset{}, err
 	}
-	return identityPresets[n.Int64()], nil
+	roll := int(n.Int64())
+	for _, preset := range identityPresets {
+		if roll < preset.weight {
+			return preset, nil
+		}
+		roll -= preset.weight
+	}
+	return identityPreset{}, fmt.Errorf("identity preset weights are invalid")
 }
 
 func randomChoice(items []string) (string, error) {
@@ -164,7 +236,7 @@ func randomChoice(items []string) (string, error) {
 	return items[n.Int64()], nil
 }
 
-func randomWorkerName(device string) (string, error) {
+func randomWorkerName(device string, profile workerProfile) (string, error) {
 	styleRoll, err := rand.Int(rand.Reader, big.NewInt(20))
 	if err != nil {
 		return "", err
@@ -174,7 +246,7 @@ func randomWorkerName(device string) (string, error) {
 		return "", err
 	}
 
-	style := workerNameStyleForRoll(styleRoll.Int64())
+	style := workerNameStyleForRoll(profile, styleRoll.Int64())
 	if style == workerNameBare {
 		return "", nil
 	}
@@ -184,7 +256,7 @@ func randomWorkerName(device string) (string, error) {
 
 	root := deviceWorkerRoot(device)
 	if style == workerNameGenericNumbered || style == workerNameGenericPlain {
-		root, err = randomGenericWorkerRoot()
+		root, err = randomGenericWorkerRoot(profile)
 		if err != nil {
 			return "", err
 		}
@@ -206,7 +278,39 @@ const (
 	workerNameNumeric
 )
 
-func workerNameStyleForRoll(roll int64) workerNameStyle {
+func workerNameStyleForRoll(profile workerProfile, roll int64) workerNameStyle {
+	if profile == workerProfileIndustrial {
+		switch {
+		case roll < 1: // 5%
+			return workerNameBare
+		case roll < 5: // 20%
+			return workerNameHardwareNumbered
+		case roll < 7: // 10%
+			return workerNameHardwarePlain
+		case roll < 14: // 35%
+			return workerNameGenericNumbered
+		case roll < 16: // 10%
+			return workerNameGenericPlain
+		default: // 20%
+			return workerNameNumeric
+		}
+	}
+	if profile == workerProfileRental {
+		switch {
+		case roll < 1: // 5%
+			return workerNameBare
+		case roll < 2: // 5%
+			return workerNameHardwareNumbered
+		case roll < 3: // 5%
+			return workerNameHardwarePlain
+		case roll < 8: // 25%
+			return workerNameGenericNumbered
+		case roll < 16: // 40%
+			return workerNameGenericPlain
+		default: // 20%
+			return workerNameNumeric
+		}
+	}
 	switch {
 	case roll < 5: // 25%
 		return workerNameBare
@@ -223,7 +327,20 @@ func workerNameStyleForRoll(roll int64) workerNameStyle {
 	}
 }
 
-func randomGenericWorkerRoot() (string, error) {
+func randomGenericWorkerRoot(profile workerProfile) (string, error) {
+	if profile == workerProfileIndustrial {
+		style, err := rand.Int(rand.Reader, big.NewInt(10))
+		if err != nil {
+			return "", err
+		}
+		if style.Int64() < 6 {
+			return randomChoice(industrialWorkerRoots)
+		}
+		return randomCompound(industrialLocationPrefixes, industrialRoleSuffixes)
+	}
+	if profile == workerProfileRental {
+		return randomChoice(rentalWorkerRoots)
+	}
 	style, err := rand.Int(rand.Reader, big.NewInt(20))
 	if err != nil {
 		return "", err

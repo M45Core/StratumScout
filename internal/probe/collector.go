@@ -3,11 +3,13 @@ package probe
 import (
 	"bufio"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
+	"math/big"
 	"net"
 	"net/netip"
 	"sort"
@@ -23,7 +25,8 @@ const (
 	blockWindow           = 30 * time.Second
 	activeBlockLimit      = 32
 	completedBlockLimit   = 256
-	connectionMaxAge      = 2 * time.Hour
+	connectionRefreshMin  = 105 * time.Minute
+	connectionRefreshSpan = 30 * time.Minute
 	maxStratumMessageSize = 256 << 10
 )
 
@@ -35,7 +38,10 @@ var (
 	errPoolRejected           = errors.New("pool rejected probe")
 	errStratumMessageTooLarge = errors.New("stratum message exceeds size limit")
 	requestTimeout            = 30 * time.Second
-	pingInterval              = 60 * time.Second
+	pingInitialDelayMin       = 15 * time.Second
+	pingInitialDelayJitter    = 30 * time.Second
+	pingIntervalMin           = 45 * time.Second
+	pingIntervalJitter        = 30 * time.Second
 	pingResponseWindow        = 10 * time.Second
 	sessionReadTimeout        = 90 * time.Second
 	dialEndpoint              = dialPublicEndpoint
@@ -84,6 +90,10 @@ type activeBlock struct {
 func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func([]model.Observation) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	refreshAge, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
+	if err != nil {
+		return err
+	}
 	events := make(chan event, 256)
 	configured := make(map[string]endpointTarget)
 	var wg sync.WaitGroup
@@ -106,7 +116,7 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 	blocks := map[string]*activeBlock{}
 	completedBlocks := map[string]bool{}
 	completedBlockOrder := make([]string, 0, completedBlockLimit)
-	refreshEligibleAt := time.Now().Add(connectionMaxAge)
+	refreshEligibleAt := time.Now().Add(refreshAge)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	finish := func(r *activeBlock) error {
@@ -291,7 +301,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
 	subscribeStarted := time.Now()
-	if err := request(w, 1, "mining.subscribe", []string{identity.Agent}); err != nil {
+	if err := request(w, 1, "mining.subscribe", []string{identity.Agent}, identity.wireStyle); err != nil {
 		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusError, "subscribe_write_failed")
 		return err
 	}
@@ -320,7 +330,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	}
 
 	authorizeStarted := time.Now()
-	if err := request(w, 2, "mining.authorize", []string{identity.Username, "x"}); err != nil {
+	if err := request(w, 2, "mining.authorize", []string{identity.Username, "x"}, identity.wireStyle); err != nil {
 		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, model.ProtocolStatusError, "authorize_write_failed")
 		return err
 	}
@@ -358,19 +368,23 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	}()
 
 	var window notifyWindow
-	pingID := 1000
+	pingID := 2
 	pingPending := false
 	pingDisabled := false
 	pingStarted := time.Time{}
 	pingDeadline := time.Time{}
-	nextPing := time.Now()
+	initialPingDelay, err := randomizedDuration(pingInitialDelayMin, pingInitialDelayJitter)
+	if err != nil {
+		return err
+	}
+	nextPing := time.Now().Add(initialPingDelay)
 
 	for {
 		now := time.Now()
 		if !pingDisabled && !pingPending && !nextPing.IsZero() && !now.Before(nextPing) {
 			pingID++
 			pingStarted = now
-			if err := request(w, pingID, model.ProtocolPing, []any{}); err != nil {
+			if err := request(w, pingID, model.ProtocolPing, []any{}, identity.wireStyle); err != nil {
 				_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, model.ProtocolStatusError, "ping_write_failed")
 				return err
 			}
@@ -439,7 +453,11 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 			}
 			pingPending = false
 			if !pingDisabled {
-				nextPing = time.Now().Add(pingInterval)
+				interval, err := randomizedDuration(pingIntervalMin, pingIntervalJitter)
+				if err != nil {
+					return err
+				}
+				nextPing = time.Now().Add(interval)
 			}
 			continue
 		}
@@ -577,15 +595,36 @@ func tlsErrorCategory(err error) string {
 	return "tls_handshake_failed"
 }
 
-func request(w *bufio.Writer, id int, method string, params any) error {
-	b, err := json.Marshal(map[string]any{"id": id, "method": method, "params": params})
+func request(w *bufio.Writer, id int, method string, params any, style stratumWireStyle) error {
+	methodJSON, err := json.Marshal(method)
 	if err != nil {
 		return err
+	}
+	paramsJSON, err := json.Marshal(params)
+	if err != nil {
+		return err
+	}
+	var b []byte
+	if style == stratumWireSpaced {
+		b = fmt.Appendf(nil, `{"id": %d, "method": %s, "params": %s}`, id, methodJSON, paramsJSON)
+	} else {
+		b = fmt.Appendf(nil, `{"id":%d,"method":%s,"params":%s}`, id, methodJSON, paramsJSON)
 	}
 	if _, err := w.Write(append(b, '\n')); err != nil {
 		return err
 	}
 	return w.Flush()
+}
+
+func randomizedDuration(minimum, jitter time.Duration) (time.Duration, error) {
+	if jitter <= 0 {
+		return minimum, nil
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(jitter)+1))
+	if err != nil {
+		return 0, err
+	}
+	return minimum + time.Duration(n.Int64()), nil
 }
 
 func response(w *bufio.Writer, id any, result any) error {

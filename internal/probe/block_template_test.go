@@ -139,6 +139,18 @@ func TestConnectionRefreshUsesNextCompletedBlockAfterMaximumAge(t *testing.T) {
 	}
 }
 
+func TestConnectionRefreshAgeIsBounded(t *testing.T) {
+	for range 100 {
+		age, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if age < connectionRefreshMin || age > connectionRefreshMin+connectionRefreshSpan {
+			t.Fatalf("connection refresh age %s outside [%s,%s]", age, connectionRefreshMin, connectionRefreshMin+connectionRefreshSpan)
+		}
+	}
+}
+
 func TestBlockObservationsAreEmittedPerEndpointIncludingMisses(t *testing.T) {
 	started := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{

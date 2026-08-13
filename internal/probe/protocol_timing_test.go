@@ -2,6 +2,7 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -20,6 +21,7 @@ import (
 
 func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {
 	allowLocalEndpointDial(t)
+	useImmediatePings(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -129,6 +131,42 @@ func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {
 	}
 }
 
+func TestRequestWireStyles(t *testing.T) {
+	for _, test := range []struct {
+		style stratumWireStyle
+		want  string
+	}{
+		{stratumWireCompact, "{\"id\":1,\"method\":\"mining.subscribe\",\"params\":[\"bitaxe/BM1370/v2.14.2\"]}\n"},
+		{stratumWireSpaced, "{\"id\": 1, \"method\": \"mining.subscribe\", \"params\": [\"NerdQAxe++/BM1370/V1.0.37.2-LTS\"]}\n"},
+	} {
+		var output bytes.Buffer
+		writer := bufio.NewWriter(&output)
+		agent := "bitaxe/BM1370/v2.14.2"
+		if test.style == stratumWireSpaced {
+			agent = "NerdQAxe++/BM1370/V1.0.37.2-LTS"
+		}
+		if err := request(writer, 1, model.ProtocolSubscribe, []string{agent}, test.style); err != nil {
+			t.Fatal(err)
+		}
+		if output.String() != test.want {
+			t.Errorf("wire request = %q, want %q", output.String(), test.want)
+		}
+	}
+}
+
+func TestRandomizedDurationBounds(t *testing.T) {
+	minimum, jitter := 15*time.Second, 30*time.Second
+	for range 100 {
+		got, err := randomizedDuration(minimum, jitter)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got < minimum || got > minimum+jitter {
+			t.Fatalf("randomized duration %s outside [%s,%s]", got, minimum, minimum+jitter)
+		}
+	}
+}
+
 func TestWatchSessionReportsInvalidTLSCertificate(t *testing.T) {
 	allowLocalEndpointDial(t)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -216,5 +254,14 @@ func allowLocalEndpointDial(t *testing.T) {
 	dialEndpoint = dialer.DialContext
 	t.Cleanup(func() {
 		dialEndpoint = original
+	})
+}
+
+func useImmediatePings(t *testing.T) {
+	t.Helper()
+	originalMin, originalJitter := pingInitialDelayMin, pingInitialDelayJitter
+	pingInitialDelayMin, pingInitialDelayJitter = 0, 0
+	t.Cleanup(func() {
+		pingInitialDelayMin, pingInitialDelayJitter = originalMin, originalJitter
 	})
 }

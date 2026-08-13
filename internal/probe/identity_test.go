@@ -32,7 +32,7 @@ func TestIdentityPresetsArePairedASICMiners(t *testing.T) {
 
 	agents := make(map[string]bool, len(identityPresets))
 	for _, preset := range identityPresets {
-		if len(preset.agents) == 0 || preset.worker == "" {
+		if len(preset.agents) == 0 || preset.worker == "" || preset.weight <= 0 {
 			t.Fatalf("empty identity preset: %+v", preset)
 		}
 		if strings.ContainsAny(preset.worker, ". ") {
@@ -91,10 +91,10 @@ func TestHardwareWorkerNamesMatchUserAgents(t *testing.T) {
 		"futurebit-apollo":     {"bfgminer/", "apollo"},
 		"antminer-s21":         {"Antminer"},
 		"antminer-s19-pro":     {"bmminer/"},
-		"antminer-s19-braiins": {"bosminer/"},
+		"antminer-s19-braiins": {"20"},
 		"whatsminer-m60s":      {"whatsminer/"},
 		"antminer-s21-vnish":   {"xminer-"},
-		"epic-blockminer":      {"PowerPlay-BM/"},
+		"epic-blockminer":      {"PowerPlay-BM"},
 		"nicehash-sha256":      {"NiceHash/"},
 		"luckyminer-lv07":      {"LuckyMiner"},
 		"bitforge-nano":        {"bitforge/BM1370/"},
@@ -120,6 +120,25 @@ func TestHardwareWorkerNamesMatchUserAgents(t *testing.T) {
 				t.Errorf("worker %q is incompatible with user-agent %q", preset.worker, agent)
 			}
 		}
+	}
+}
+
+func TestIdentityPresetWeightsFollowObservedFamilyMix(t *testing.T) {
+	var total, bitaxe, nerd, cgminer int
+	for _, preset := range identityPresets {
+		total += preset.weight
+		agent := preset.agents[0]
+		switch {
+		case strings.HasPrefix(agent, "bitaxe/"):
+			bitaxe += preset.weight
+		case strings.HasPrefix(agent, "Nerd"), strings.HasPrefix(agent, "Q137"):
+			nerd += preset.weight
+		case strings.HasPrefix(agent, "cgminer/"):
+			cgminer += preset.weight
+		}
+	}
+	if total != 196 || bitaxe != 100 || nerd != 52 || cgminer != 22 {
+		t.Fatalf("unexpected preset weights: total=%d bitaxe=%d nerd=%d cgminer=%d", total, bitaxe, nerd, cgminer)
 	}
 }
 
@@ -151,6 +170,9 @@ func TestVersionedFamiliesVaryWithoutChangingWireFormat(t *testing.T) {
 	} {
 		allRoots = append(allRoots, workerCompounds(parts.prefixes, parts.suffixes)...)
 	}
+	allRoots = append(allRoots, industrialWorkerRoots...)
+	allRoots = append(allRoots, workerCompounds(industrialLocationPrefixes, industrialRoleSuffixes)...)
+	allRoots = append(allRoots, rentalWorkerRoots...)
 	if len(allRoots) < 400 {
 		t.Fatalf("composed worker vocabulary is too narrow: %d", len(allRoots))
 	}
@@ -164,11 +186,39 @@ func TestVersionedFamiliesVaryWithoutChangingWireFormat(t *testing.T) {
 	}
 }
 
+func TestCurrentFirmwareVersionsAreMoreLikely(t *testing.T) {
+	for _, test := range []struct {
+		agents  []string
+		current string
+		older   string
+	}{
+		{axeAgents("BM1370"), "bitaxe/BM1370/v2.14.2", "bitaxe/BM1370/v2.10.1"},
+		{nerdAgents("NerdQAxe++", "BM1370"), "NerdQAxe++/BM1370/V1.0.37.2-LTS", "NerdQAxe++/BM1370/v1.0.35"},
+	} {
+		counts := make(map[string]int)
+		for _, agent := range test.agents {
+			counts[agent]++
+		}
+		if counts[test.current] <= counts[test.older] {
+			t.Errorf("current firmware %q is not weighted above %q", test.current, test.older)
+		}
+	}
+}
+
 func TestRandomWorkerNamesArePortable(t *testing.T) {
-	for _, device := range []string{"bitaxe-gamma-turbo", "NerdOCTAXE-γ", "futurebit-apollo", "---"} {
+	for _, sample := range []struct {
+		device  string
+		profile workerProfile
+	}{
+		{"bitaxe-gamma-turbo", workerProfileHome},
+		{"NerdOCTAXE-γ", workerProfileHome},
+		{"antminer-s19-braiins", workerProfileIndustrial},
+		{"nicehash-sha256", workerProfileRental},
+		{"---", workerProfileHome},
+	} {
 		seen := make(map[string]bool)
 		for range 100 {
-			worker, err := randomWorkerName(device)
+			worker, err := randomWorkerName(sample.device, sample.profile)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -178,27 +228,35 @@ func TestRandomWorkerNamesArePortable(t *testing.T) {
 			seen[worker] = true
 		}
 		if len(seen) < 2 {
-			t.Fatalf("worker names did not vary for %q: %v", device, seen)
+			t.Fatalf("worker names did not vary for %q: %v", sample.device, seen)
 		}
 	}
 }
 
 func TestWorkerNameStyleWeights(t *testing.T) {
-	counts := make(map[workerNameStyle]int)
-	for roll := int64(0); roll < 20; roll++ {
-		counts[workerNameStyleForRoll(roll)]++
+	wants := map[workerProfile]map[workerNameStyle]int{
+		workerProfileHome: {
+			workerNameBare: 5, workerNameHardwareNumbered: 5, workerNameHardwarePlain: 4,
+			workerNameGenericNumbered: 3, workerNameGenericPlain: 2, workerNameNumeric: 1,
+		},
+		workerProfileIndustrial: {
+			workerNameBare: 1, workerNameHardwareNumbered: 4, workerNameHardwarePlain: 2,
+			workerNameGenericNumbered: 7, workerNameGenericPlain: 2, workerNameNumeric: 4,
+		},
+		workerProfileRental: {
+			workerNameBare: 1, workerNameHardwareNumbered: 1, workerNameHardwarePlain: 1,
+			workerNameGenericNumbered: 5, workerNameGenericPlain: 8, workerNameNumeric: 4,
+		},
 	}
-	want := map[workerNameStyle]int{
-		workerNameBare:             5,
-		workerNameHardwareNumbered: 5,
-		workerNameHardwarePlain:    4,
-		workerNameGenericNumbered:  3,
-		workerNameGenericPlain:     2,
-		workerNameNumeric:          1,
-	}
-	for style, wantCount := range want {
-		if counts[style] != wantCount {
-			t.Errorf("worker style %d has %d rolls, want %d", style, counts[style], wantCount)
+	for profile, want := range wants {
+		counts := make(map[workerNameStyle]int)
+		for roll := int64(0); roll < 20; roll++ {
+			counts[workerNameStyleForRoll(profile, roll)]++
+		}
+		for style, wantCount := range want {
+			if counts[style] != wantCount {
+				t.Errorf("profile %d style %d has %d rolls, want %d", profile, style, counts[style], wantCount)
+			}
 		}
 	}
 }
@@ -218,7 +276,7 @@ func TestGeneratedIdentityExamples(t *testing.T) {
 		if err != nil {
 			t.Fatal(err)
 		}
-		worker, err := randomWorkerName(preset.worker)
+		worker, err := randomWorkerName(preset.worker, preset.profile)
 		if err != nil {
 			t.Fatal(err)
 		}
