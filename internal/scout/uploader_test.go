@@ -149,3 +149,28 @@ func TestUploaderTreatsDuplicateBatchAsDelivered(t *testing.T) {
 		t.Fatalf("attempts=%d stats=%+v", attempts.Load(), stats)
 	}
 }
+
+func BenchmarkEncodeEnvelope(b *testing.B) {
+	started := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC)
+	observations := make([]model.Observation, batchSize)
+	for index := range observations {
+		duration := 12.5 + float64(index)
+		observations[index] = model.Observation{
+			Version: model.ObservationVersion, ObservationID: fmt.Sprintf("run/observation-%d", index),
+			RunID: "run", ObservedAt: started, PoolID: "pool", Endpoint: "pool.example:3333",
+			RecordType: model.RecordTypeProtocol, ProtocolMethod: model.ProtocolPing,
+			ResponseStatus: model.ProtocolStatusOK, DurationMS: &duration,
+		}
+	}
+	value := envelope{
+		SchemaVersion: 1, BatchID: "run-batch-1", RunID: "run", AgentVersion: AgentVersion,
+		ConfigRevision: "sha256:" + strings.Repeat("a", 64), Region: "lax", Vantage: "us-west",
+		MachineID: "machine", StartedAt: started, SentAt: started.Add(time.Minute), Observations: observations,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := encodeEnvelope(value); err != nil {
+			b.Fatal(err)
+		}
+	}
+}

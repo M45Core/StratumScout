@@ -47,6 +47,12 @@ coinbase input contains a valid BIP34 height. StratumStats uses that value for
 the selected region's block-height indicator; Scout does not query a separate
 Bitcoin node for chain-tip state.
 
+Scout timestamps each complete Stratum message immediately after the wire read,
+before JSON parsing, coinbase reconstruction, or merkle verification. Validation
+still decides whether a block-template arrival is accepted. Protocol response
+timings use the same wire-completion boundary so parsing work is not attributed
+to the pool.
+
 ## Configuration
 
 | Variable | Required | Default | Purpose |

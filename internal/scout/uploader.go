@@ -31,6 +31,10 @@ const (
 	maxRetryAfter  = 30 * time.Second
 )
 
+var envelopeGZIPWriters = sync.Pool{
+	New: func() any { return gzip.NewWriter(io.Discard) },
+}
+
 type envelope struct {
 	SchemaVersion  int                 `json:"schema_version"`
 	BatchID        string              `json:"batch_id"`
@@ -271,13 +275,15 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 }
 
 func encodeEnvelope(value envelope) ([]byte, error) {
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return nil, err
-	}
 	var compressed bytes.Buffer
-	writer := gzip.NewWriter(&compressed)
-	if _, err := writer.Write(encoded); err != nil {
+	writer := envelopeGZIPWriters.Get().(*gzip.Writer)
+	writer.Reset(&compressed)
+	defer func() {
+		writer.Reset(io.Discard)
+		envelopeGZIPWriters.Put(writer)
+	}()
+	if err := json.NewEncoder(writer).Encode(value); err != nil {
+		_ = writer.Close()
 		return nil, err
 	}
 	if err := writer.Close(); err != nil {

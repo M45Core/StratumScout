@@ -262,13 +262,14 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 
 	connectStarted := time.Now()
 	rawConn, err := dialEndpoint(ctx, "tcp", address)
+	connectFinished := time.Now()
 	if err != nil {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, protocolErrorStatus(err), "connect_failed")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, connectFinished, protocolErrorStatus(err), "connect_failed")
 		return err
 	}
 	stopContextClose := context.AfterFunc(ctx, func() { _ = rawConn.Close() })
 	defer stopContextClose()
-	if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, model.ProtocolStatusOK, ""); err != nil {
+	if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolConnect, connectStarted, connectFinished, model.ProtocolStatusOK, ""); err != nil {
 		_ = rawConn.Close()
 		return err
 	}
@@ -278,11 +279,13 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	if endpoint.TLS {
 		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: endpoint.Host, MinVersion: tls.VersionTLS12})
 		tlsStarted := time.Now()
-		if err := tlsConn.HandshakeContext(ctx); err != nil {
-			_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolTLSHandshake, tlsStarted, protocolErrorStatus(err), tlsErrorCategory(err))
+		err := tlsConn.HandshakeContext(ctx)
+		tlsFinished := time.Now()
+		if err != nil {
+			_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolTLSHandshake, tlsStarted, tlsFinished, protocolErrorStatus(err), tlsErrorCategory(err))
 			return err
 		}
-		if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolTLSHandshake, tlsStarted, model.ProtocolStatusOK, ""); err != nil {
+		if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolTLSHandshake, tlsStarted, tlsFinished, model.ProtocolStatusOK, ""); err != nil {
 			return err
 		}
 		conn = tlsConn
@@ -305,27 +308,27 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusError, "subscribe_write_failed")
 		return err
 	}
-	subscribeResult, remoteErr, err := awaitResponse(ctx, conn, r, w, identity.Agent, 1, requestTimeout)
+	subscribeResult, remoteErr, subscribeFinished, err := awaitResponse(ctx, conn, r, w, identity.Agent, 1, requestTimeout)
 	if err != nil {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, protocolErrorStatus(err), "subscribe_response_failed")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, subscribeFinished, protocolErrorStatus(err), "subscribe_response_failed")
 		return fmt.Errorf("subscribe: %w", err)
 	}
 	if remoteErr != nil {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusRejected, "subscribe_rejected")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, subscribeFinished, model.ProtocolStatusRejected, "subscribe_rejected")
 		return fmt.Errorf("%w: subscription rejected", errPoolRejected)
 	}
 	var subscribe []json.RawMessage
 	var extraNonce1 string
 	var extraNonce2Size int
 	if json.Unmarshal(subscribeResult, &subscribe) != nil || len(subscribe) < 3 {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusError, "subscribe_invalid_response")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, subscribeFinished, model.ProtocolStatusError, "subscribe_invalid_response")
 		return fmt.Errorf("subscribe: invalid response")
 	}
 	if json.Unmarshal(subscribe[1], &extraNonce1) != nil || json.Unmarshal(subscribe[2], &extraNonce2Size) != nil || extraNonce1 == "" || extraNonce2Size <= 0 {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusError, "subscribe_invalid_extranonce")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, subscribeFinished, model.ProtocolStatusError, "subscribe_invalid_extranonce")
 		return fmt.Errorf("subscribe: invalid extranonce")
 	}
-	if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, model.ProtocolStatusOK, ""); err != nil {
+	if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolSubscribe, subscribeStarted, subscribeFinished, model.ProtocolStatusOK, ""); err != nil {
 		return err
 	}
 
@@ -334,21 +337,21 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, model.ProtocolStatusError, "authorize_write_failed")
 		return err
 	}
-	authorizeResult, remoteErr, err := awaitResponse(ctx, conn, r, w, identity.Agent, 2, requestTimeout)
+	authorizeResult, remoteErr, authorizeFinished, err := awaitResponse(ctx, conn, r, w, identity.Agent, 2, requestTimeout)
 	if err != nil {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, protocolErrorStatus(err), "authorize_response_failed")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, authorizeFinished, protocolErrorStatus(err), "authorize_response_failed")
 		return fmt.Errorf("authorize: %w", err)
 	}
 	if remoteErr != nil {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, model.ProtocolStatusRejected, "authorize_rejected")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, authorizeFinished, model.ProtocolStatusRejected, "authorize_rejected")
 		return fmt.Errorf("%w: authorization rejected", errPoolRejected)
 	}
 	var authorized bool
 	if json.Unmarshal(authorizeResult, &authorized) != nil || !authorized {
-		_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, model.ProtocolStatusRejected, "authorize_rejected")
+		_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, authorizeFinished, model.ProtocolStatusRejected, "authorize_rejected")
 		return fmt.Errorf("%w: authorization rejected", errPoolRejected)
 	}
-	if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, model.ProtocolStatusOK, ""); err != nil {
+	if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, authorizeFinished, model.ProtocolStatusOK, ""); err != nil {
 		return err
 	}
 
@@ -403,6 +406,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 			return err
 		}
 		line, err := readStratumMessage(r)
+		receivedAt := time.Now()
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
@@ -448,7 +452,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 					pingDisabled = true
 				}
 			}
-			if err := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, status, category); err != nil {
+			if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, receivedAt, status, category); err != nil {
 				return err
 			}
 			pingPending = false
@@ -492,7 +496,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		job.Bits, _ = msg.Params[6].(string)
 		job.NTime, _ = msg.Params[7].(string)
 		verification := VerifyJob(job)
-		e := event{poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS), prevHash: prev, at: time.Now(), hasTransactions: len(branches) > 0, tls: endpoint.TLS, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
+		e := event{poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS), prevHash: prev, at: receivedAt, hasTransactions: len(branches) > 0, tls: endpoint.TLS, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
 		select {
 		case out <- e:
 		case <-ctx.Done():
@@ -559,11 +563,15 @@ func endpointConnectionID(poolID, address string, tls bool) string {
 }
 
 func publishProtocol(ctx context.Context, out chan<- event, poolID string, endpoint model.Endpoint, method string, started time.Time, status, errorCategory string) error {
-	duration := float64(time.Since(started).Nanoseconds()) / float64(time.Millisecond)
+	return publishProtocolAt(ctx, out, poolID, endpoint, method, started, time.Now(), status, errorCategory)
+}
+
+func publishProtocolAt(ctx context.Context, out chan<- event, poolID string, endpoint model.Endpoint, method string, started, finished time.Time, status, errorCategory string) error {
+	duration := float64(finished.Sub(started).Nanoseconds()) / float64(time.Millisecond)
 	record := model.Observation{
 		Version:        model.ObservationVersion,
 		RecordType:     model.RecordTypeProtocol,
-		ObservedAt:     time.Now().UTC(),
+		ObservedAt:     finished.UTC(),
 		PoolID:         poolID,
 		Endpoint:       net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)),
 		ProtocolMethod: method,
@@ -638,18 +646,19 @@ func response(w *bufio.Writer, id any, result any) error {
 	return w.Flush()
 }
 
-func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.Writer, agent string, id int, timeout time.Duration) (json.RawMessage, any, error) {
+func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.Writer, agent string, id int, timeout time.Duration) (json.RawMessage, any, time.Time, error) {
 	deadline := time.Now().Add(timeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
 	for {
 		if err := conn.SetReadDeadline(deadline); err != nil {
-			return nil, nil, err
+			return nil, nil, time.Now(), err
 		}
 		line, err := readStratumMessage(r)
+		receivedAt := time.Now()
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, receivedAt, err
 		}
 		var msg struct {
 			ID     any             `json:"id"`
@@ -662,14 +671,14 @@ func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio
 		}
 		if msg.Method == "client.get_version" {
 			if err := response(w, msg.ID, agent); err != nil {
-				return nil, nil, err
+				return nil, nil, time.Now(), err
 			}
 			continue
 		}
 		if responseID(msg.ID) != id {
 			continue
 		}
-		return msg.Result, msg.Error, nil
+		return msg.Result, msg.Error, receivedAt, nil
 	}
 }
 
