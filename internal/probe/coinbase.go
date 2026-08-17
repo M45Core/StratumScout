@@ -13,6 +13,7 @@ import (
 const (
 	maxCoinbaseOutputsStored = model.MaxRetainedCoinbaseOutputs
 	maxRetainedScriptBytes   = model.MaxRetainedCoinbaseScriptBytes
+	maxBitcoinSats           = uint64(21_000_000 * 100_000_000)
 	bech32Charset            = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
 )
 
@@ -31,7 +32,7 @@ type coinbaseSummary struct {
 // Matching uses the exact scriptPubKey generated for this probe session.
 func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 	var result coinbaseSummary
-	destinations := make(map[string]*model.CoinbaseOutput)
+	var destinations map[string]*model.CoinbaseOutput
 	cursor := 0
 	take := func(n uint64) ([]byte, error) {
 		if cursor > len(raw) {
@@ -51,6 +52,9 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 	}
 	witness := false
 	if len(raw)-cursor >= 2 && raw[cursor] == 0x00 && raw[cursor+1] != 0x00 {
+		if raw[cursor+1] != 0x01 {
+			return result, fmt.Errorf("unsupported transaction witness flags 0x%x", raw[cursor+1])
+		}
 		witness = true
 		cursor += 2
 	}
@@ -58,19 +62,24 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 	if err != nil {
 		return result, fmt.Errorf("input count: %w", err)
 	}
-	if inputs == 0 || inputs > 1000 {
-		return result, fmt.Errorf("implausible input count %d", inputs)
+	if inputs != 1 {
+		return result, fmt.Errorf("coinbase has %d inputs, want 1", inputs)
 	}
+	var nullHash [32]byte
 	for i := uint64(0); i < inputs; i++ {
-		if _, err := take(36); err != nil {
+		previousOutput, err := take(36)
+		if err != nil {
 			return result, err
+		}
+		if !bytes.Equal(previousOutput[:32], nullHash[:]) || binary.LittleEndian.Uint32(previousOutput[32:]) != ^uint32(0) {
+			return result, fmt.Errorf("coinbase input does not spend the null outpoint")
 		}
 		scriptLen, err := readCompactSize(raw, &cursor)
 		if err != nil {
 			return result, err
 		}
-		if scriptLen > uint64(len(raw)) {
-			return result, fmt.Errorf("input script too large")
+		if scriptLen < 2 || scriptLen > 100 {
+			return result, fmt.Errorf("coinbase input script length %d is outside 2..100", scriptLen)
 		}
 		script, err := take(scriptLen)
 		if err != nil {
@@ -101,8 +110,8 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 			return result, err
 		}
 		value := binary.LittleEndian.Uint64(valueBytes)
-		if ^uint64(0)-result.TotalSats < value {
-			return result, fmt.Errorf("output value overflow")
+		if value > maxBitcoinSats || value > maxBitcoinSats-result.TotalSats {
+			return result, fmt.Errorf("output value exceeds the Bitcoin supply")
 		}
 		result.TotalSats += value
 		scriptLen, err := readCompactSize(raw, &cursor)
@@ -139,6 +148,9 @@ func analyzeCoinbase(raw, workerScript []byte) (coinbaseSummary, error) {
 		}
 		address, scriptType := describeOutputScript(script)
 		scriptHex, scriptTruncated := retainedScriptHex(script)
+		if destinations == nil {
+			destinations = make(map[string]*model.CoinbaseOutput)
+		}
 		destinations[key] = &model.CoinbaseOutput{
 			ValueSats:             value,
 			ScriptPubKey:          scriptHex,
@@ -203,6 +215,9 @@ func decodeCoinbaseHeight(script []byte) (uint64, bool) {
 	}
 	size := int(script[0])
 	if size < 1 || size > 5 || len(script) < size+1 || script[size]&0x80 != 0 {
+		return 0, false
+	}
+	if script[size]&0x7f == 0 && (size == 1 || script[size-1]&0x80 == 0) {
 		return 0, false
 	}
 	var height uint64

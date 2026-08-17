@@ -145,6 +145,17 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 				return err
 			}
 		case now := <-ticker.C:
+			// Consume everything already buffered before deciding which block
+			// windows have closed. Otherwise a ready ticker can win the select
+			// while an arrival for the closing window is still queued, causing
+			// that endpoint's on-time observation to be discarded as late.
+			closed, err := drainBufferedEvents(events, handleEvent)
+			if err != nil {
+				return err
+			}
+			if closed {
+				return nil
+			}
 			completedBlock := false
 			for id, r := range blocks {
 				if now.Sub(r.started) >= blockWindow {
@@ -160,23 +171,6 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 					completedBlock = true
 				}
 			}
-			// Drain events already timestamped at this boundary. A newly arrived
-			// block keeps the current cohort open; protocol records remain in the
-			// cohort whose interval actually contains their wire completion time.
-			drained := false
-			for !drained {
-				select {
-				case e, ok := <-events:
-					if !ok {
-						return nil
-					}
-					if err := handleEvent(e); err != nil {
-						return err
-					}
-				default:
-					drained = true
-				}
-			}
 			if shouldCompleteCohort(cohortHasCompletedBlock, len(blocks)) {
 				if err := emit(nil, now.UTC()); err != nil {
 					return err
@@ -188,6 +182,22 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 			}
 		}
 	}
+}
+
+func drainBufferedEvents(events <-chan event, handle func(event) error) (bool, error) {
+	// Bound the drain to the snapshot that was buffered when the tick won the
+	// select. Producers remain free to enqueue newer events without starving
+	// block-window completion.
+	for range len(events) {
+		e, ok := <-events
+		if !ok {
+			return true, nil
+		}
+		if err := handle(e); err != nil {
+			return false, err
+		}
+	}
+	return false, nil
 }
 
 func shouldRefreshConnections(now, eligibleAt time.Time, completedBlock bool, activeBlocks int) bool {
@@ -279,6 +289,10 @@ func activeBlockForEvent(blocks map[string]*activeBlock, completed map[string]bo
 }
 
 func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, out chan<- event) error {
+	return watchSessionWithReady(ctx, poolID, endpoint, out, nil)
+}
+
+func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.Endpoint, out chan<- event, ready func()) error {
 	identity, err := RandomIdentity()
 	if err != nil {
 		return err
@@ -370,6 +384,9 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	}
 	if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolAuthorize, authorizeStarted, authorizeFinished, model.ProtocolStatusOK, ""); err != nil {
 		return err
+	}
+	if ready != nil {
+		ready()
 	}
 
 	connectionID := endpointConnectionID(poolID, address, endpoint.TLS)
@@ -555,6 +572,14 @@ func recordBlockEvent(block *activeBlock, e event) {
 	id := e.connectionID
 	if id == "" {
 		id = e.poolID
+	}
+	if e.verified {
+		if block.started.IsZero() || e.at.Before(block.started) {
+			block.started = e.at
+		}
+	}
+	if !block.started.IsZero() && e.at.After(block.started.Add(blockWindow)) {
+		return
 	}
 	if !e.hasTransactions {
 		block.empty[id] = true

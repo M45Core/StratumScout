@@ -12,31 +12,49 @@ import (
 	"github.com/M45Core/StratumScout/internal/model"
 )
 
+const (
+	reconnectBackoffMin = time.Second
+	reconnectBackoffMax = time.Minute
+)
+
 // watch keeps a pool endpoint represented through ordinary transient network
 // failures. Backoff is bounded so a recovered endpoint rejoins promptly.
 func watch(ctx context.Context, poolID string, endpoint model.Endpoint, out chan<- event) error {
-	backoff := time.Second
+	backoff := reconnectBackoffMin
 	for {
-		err := watchSession(ctx, poolID, endpoint, out)
+		established := false
+		err := watchSessionWithReady(ctx, poolID, endpoint, out, func() { established = true })
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if !shouldRetry(err) {
 			return fmt.Errorf("not retrying after permanent rejection: %w", err)
 		}
-		log.Printf("probe pool=%s endpoint=%s disconnected category=%s retry_in=%s", poolID, net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)), connectionErrorCategory(err), backoff)
-		timer := time.NewTimer(backoff)
+		delay, nextBackoff := advanceReconnectBackoff(backoff, established)
+		log.Printf("probe pool=%s endpoint=%s disconnected category=%s retry_in=%s", poolID, net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)), connectionErrorCategory(err), delay)
+		timer := time.NewTimer(delay)
 		select {
 		case <-ctx.Done():
 			timer.Stop()
 			return ctx.Err()
 		case <-timer.C:
 		}
-		backoff *= 2
-		if backoff > time.Minute {
-			backoff = time.Minute
-		}
+		backoff = nextBackoff
 	}
+}
+
+func advanceReconnectBackoff(current time.Duration, established bool) (time.Duration, time.Duration) {
+	if established || current < reconnectBackoffMin {
+		current = reconnectBackoffMin
+	}
+	if current > reconnectBackoffMax {
+		current = reconnectBackoffMax
+	}
+	next := current * 2
+	if next > reconnectBackoffMax {
+		next = reconnectBackoffMax
+	}
+	return current, next
 }
 
 func shouldRetry(err error) bool {

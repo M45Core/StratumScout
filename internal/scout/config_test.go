@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -102,12 +103,16 @@ func TestLoadConfigRejectsUnsafeIdentifiers(t *testing.T) {
 }
 
 func TestFetchProbeConfig(t *testing.T) {
+	body := encodedProbeConfig(t, []ProbePool{{ID: "pool", Endpoints: []ProbeEndpoint{
+		{Host: "us.example", Port: 3333, Continent: "north-america"},
+		{Host: "eu.example", Port: 3333, Continent: "europe"},
+		{Host: "global.example", Port: 3333},
+	}}})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/v1/probe-config" {
 			t.Fatalf("path=%q", request.URL.Path)
 		}
-		sum := sha256.Sum256([]byte("config"))
-		fmt.Fprintf(response, `{"schema_version":1,"config_revision":"sha256:%s","pools":[{"id":"pool","endpoints":[{"host":"us.example","port":3333,"tls":false,"continent":"north-america"},{"host":"eu.example","port":3333,"tls":false,"continent":"europe"},{"host":"global.example","port":3333,"tls":false}]}]}`, hex.EncodeToString(sum[:]))
+		_, _ = response.Write(body)
 	}))
 	defer server.Close()
 	collectorURL, _ := url.Parse(server.URL)
@@ -138,18 +143,32 @@ func TestFetchProbeConfig(t *testing.T) {
 }
 
 func TestFetchProbeConfigRejectsEmptyFilteredVantage(t *testing.T) {
+	body := encodedProbeConfig(t, []ProbePool{{ID: "pool", Endpoints: []ProbeEndpoint{{Host: "eu.example", Port: 3333, Continent: "europe"}}}})
 	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
 		if request.URL.Path != "/api/v1/probe-config" {
 			t.Fatalf("path=%q", request.URL.Path)
 		}
-		sum := sha256.Sum256([]byte("config"))
-		fmt.Fprintf(response, `{"schema_version":1,"config_revision":"sha256:%s","pools":[{"id":"pool","endpoints":[{"host":"eu.example","port":3333,"tls":false,"continent":"europe"}]}]}`, hex.EncodeToString(sum[:]))
+		_, _ = response.Write(body)
 	}))
 	defer server.Close()
 	collectorURL, _ := url.Parse(server.URL)
 	cfg := Config{CollectorURL: collectorURL, Vantage: "japan", FilterContinents: true, Client: server.Client()}
 	if _, _, err := fetchProbeConfig(context.Background(), cfg); err == nil {
 		t.Fatal("configuration with no selected endpoints was accepted")
+	}
+}
+
+func TestFetchProbeConfigRejectsOversizedBody(t *testing.T) {
+	body := encodedProbeConfig(t, []ProbePool{{ID: "pool", Endpoints: []ProbeEndpoint{{Host: "pool.example", Port: 3333}}}})
+	body = append(body, strings.Repeat(" ", maxProbeConfigBytes+1-len(body))...)
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, _ *http.Request) {
+		_, _ = response.Write(body)
+	}))
+	defer server.Close()
+	collectorURL, _ := url.Parse(server.URL)
+	cfg := Config{CollectorURL: collectorURL, Vantage: "us-west", Client: server.Client()}
+	if _, _, err := fetchProbeConfig(context.Background(), cfg); err == nil {
+		t.Fatal("oversized probe configuration was accepted")
 	}
 }
 
@@ -197,4 +216,31 @@ func TestProbeConfigRejectsExcessiveEndpointCount(t *testing.T) {
 	if err := validateProbeConfig(config); err == nil {
 		t.Fatal("excessive endpoint count accepted")
 	}
+}
+
+func TestProbeConfigRejectsMismatchedRevision(t *testing.T) {
+	sum := sha256.Sum256([]byte("different configuration"))
+	config := ProbeConfig{
+		SchemaVersion:  1,
+		ConfigRevision: "sha256:" + hex.EncodeToString(sum[:]),
+		Pools:          []ProbePool{{ID: "pool", Endpoints: []ProbeEndpoint{{Host: "pool.example", Port: 3333}}}},
+	}
+	if err := validateProbeConfig(config); err == nil {
+		t.Fatal("mismatched configuration revision was accepted")
+	}
+}
+
+func encodedProbeConfig(t *testing.T, pools []ProbePool) []byte {
+	t.Helper()
+	config := ProbeConfig{SchemaVersion: 1, Pools: pools}
+	revision, err := probeConfigRevision(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	config.ConfigRevision = revision
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return encoded
 }

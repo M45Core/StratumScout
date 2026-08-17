@@ -147,13 +147,17 @@ func fetchProbeConfig(ctx context.Context, cfg Config) (ProbeConfig, []model.Poo
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
 		return ProbeConfig{}, nil, fmt.Errorf("fetch probe configuration: HTTP %d", response.StatusCode)
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, maxProbeConfigBytes+1))
+	limited := &io.LimitedReader{R: response.Body, N: maxProbeConfigBytes + 1}
+	decoder := json.NewDecoder(limited)
 	var remote ProbeConfig
 	if err := decoder.Decode(&remote); err != nil {
 		return ProbeConfig{}, nil, fmt.Errorf("decode probe configuration: %w", err)
 	}
 	if err := ensureJSONEOF(decoder); err != nil {
 		return ProbeConfig{}, nil, err
+	}
+	if limited.N == 0 {
+		return ProbeConfig{}, nil, errors.New("probe configuration is too large")
 	}
 	if err := validateProbeConfig(remote); err != nil {
 		return ProbeConfig{}, nil, err
@@ -214,7 +218,21 @@ func validateProbeConfig(cfg ProbeConfig) error {
 			}
 		}
 	}
+	expectedRevision, err := probeConfigRevision(cfg)
+	if err != nil || cfg.ConfigRevision != expectedRevision {
+		return errors.New("probe configuration revision does not match its contents")
+	}
 	return nil
+}
+
+func probeConfigRevision(cfg ProbeConfig) (string, error) {
+	cfg.ConfigRevision = ""
+	encoded, err := json.Marshal(cfg)
+	if err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256(encoded)
+	return "sha256:" + hex.EncodeToString(sum[:]), nil
 }
 
 func validEndpointHost(host string) bool {

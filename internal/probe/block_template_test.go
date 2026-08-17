@@ -48,6 +48,59 @@ func TestInvalidTemplateDoesNotBecomeArrival(t *testing.T) {
 	}
 }
 
+func TestBufferedArrivalIsDrainedBeforeBlockFinalization(t *testing.T) {
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	block := &activeBlock{
+		id:      "block",
+		started: started,
+		eligible: map[string]endpointTarget{
+			"first":  {poolID: "first", address: "first.example:3333"},
+			"second": {poolID: "second", address: "second.example:3333"},
+		},
+		arrivals: map[string]time.Time{"first": started},
+		empty:    map[string]bool{},
+		invalid:  map[string]bool{},
+		payout:   map[string]event{},
+	}
+	events := make(chan event, 1)
+	events <- event{connectionID: "second", at: started.Add(blockWindow), verified: true}
+
+	closed, err := drainBufferedEvents(events, func(e event) error {
+		recordBlockEvent(block, e)
+		return nil
+	})
+	if err != nil || closed {
+		t.Fatalf("drain closed=%t err=%v", closed, err)
+	}
+	if observations := blockObservations(block, "us-west"); len(observations) != 2 || !observations[1].Arrived {
+		t.Fatalf("buffered arrival was omitted: %+v", observations)
+	}
+}
+
+func TestBlockWindowUsesEarliestWireTimeAndRejectsLateJobs(t *testing.T) {
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	block := &activeBlock{
+		started:  started.Add(time.Second),
+		arrivals: map[string]time.Time{},
+		empty:    map[string]bool{},
+		invalid:  map[string]bool{},
+		payout:   map[string]event{},
+	}
+	recordBlockEvent(block, event{connectionID: "earlier", at: started, verified: true})
+	recordBlockEvent(block, event{connectionID: "boundary", at: started.Add(blockWindow), verified: true})
+	recordBlockEvent(block, event{connectionID: "late", at: started.Add(blockWindow + time.Nanosecond), verified: true})
+
+	if !block.started.Equal(started) {
+		t.Fatalf("block started=%v, want earliest wire time %v", block.started, started)
+	}
+	if _, ok := block.arrivals["boundary"]; !ok {
+		t.Fatal("arrival exactly at the window boundary was rejected")
+	}
+	if _, ok := block.arrivals["late"]; ok {
+		t.Fatal("arrival after the block window was retained")
+	}
+}
+
 func TestFinalizedBlockCannotBeReopenedByLateJob(t *testing.T) {
 	blocks := map[string]*activeBlock{}
 	completed := map[string]bool{}

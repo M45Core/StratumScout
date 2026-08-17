@@ -4,7 +4,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 
 	"github.com/M45Core/StratumScout/internal/model"
 )
@@ -65,12 +64,6 @@ func VerifyJob(j Job) Verification {
 		exponent, mantissa := compact>>24, compact&0x007fffff
 		if mantissa == 0 || compact&0x00800000 != 0 || exponent < 3 || exponent > 32 {
 			errs = append(errs, "bits encodes an invalid proof-of-work target")
-		} else {
-			target := new(big.Int).SetUint64(uint64(mantissa))
-			target.Lsh(target, uint(8*(exponent-3)))
-			if target.Sign() <= 0 || target.BitLen() > 256 {
-				errs = append(errs, "proof-of-work target is out of range")
-			}
 		}
 	}
 	branches := make([][]byte, 0, len(j.MerkleBranches))
@@ -92,36 +85,53 @@ func VerifyJob(j Job) Verification {
 	var coinbaseOutputsTruncated bool
 	var estimatedPoolFeePct *float64
 	if len(errs) == 0 {
-		coinbase := append(append(append(append([]byte{}, cb1...), ex1...), make([]byte, j.ExtraNonce2Size)...), cb2...)
+		coinbase := make([]byte, len(cb1)+len(ex1)+j.ExtraNonce2Size+len(cb2))
+		cursor := copy(coinbase, cb1)
+		cursor += copy(coinbase[cursor:], ex1)
+		cursor += j.ExtraNonce2Size
+		copy(coinbase[cursor:], cb2)
 		summary, err := analyzeCoinbase(coinbase, j.WorkerScript)
 		if err != nil {
 			errs = append(errs, fmt.Sprintf("coinbase transaction: %v", err))
 		} else {
 			blockHeight = summary.BlockHeight
-			coinbaseAnalyzed = true
-			workerWalletSeen = summary.WorkerWalletSeen
-			coinbaseTotalSats = summary.TotalSats
-			workerPayoutSats = summary.WorkerSats
-			coinbaseOutputs = summary.Outputs
-			coinbaseOutputCount = summary.OutputCount
-			coinbaseOutputsTruncated = summary.OutputsTruncated
-			coinbaseOmittedSats = summary.OmittedSats
+			// The ingest contract requires positive aggregate value whenever
+			// decoded payout evidence is present. A zero-reward coinbase is still
+			// structurally valid, so retain its arrival and height without
+			// publishing an internally inconsistent payout summary.
+			if summary.TotalSats > 0 {
+				coinbaseAnalyzed = true
+				workerWalletSeen = summary.WorkerWalletSeen
+				coinbaseTotalSats = summary.TotalSats
+				workerPayoutSats = summary.WorkerSats
+				coinbaseOutputs = summary.Outputs
+				coinbaseOutputCount = summary.OutputCount
+				coinbaseOutputsTruncated = summary.OutputsTruncated
+				coinbaseOmittedSats = summary.OmittedSats
+			}
 			if summary.WorkerWalletSeen && summary.TotalSats > 0 {
 				fee := 100 * float64(summary.TotalSats-summary.WorkerSats) / float64(summary.TotalSats)
 				estimatedPoolFeePct = &fee
 			}
 		}
-		hash := doubleSHA256(coinbase)
+		hash := doubleSHA256Sum(coinbase)
+		var pair [sha256.Size * 2]byte
 		for _, branch := range branches {
-			hash = doubleSHA256(append(append([]byte{}, hash...), branch...))
+			copy(pair[:sha256.Size], hash[:])
+			copy(pair[sha256.Size:], branch)
+			hash = doubleSHA256Sum(pair[:])
 		}
-		root = hex.EncodeToString(hash)
+		root = hex.EncodeToString(hash[:])
 	}
 	return Verification{Valid: len(errs) == 0, Errors: errs, MerkleRoot: root, BlockHeight: blockHeight, CoinbaseAnalyzed: coinbaseAnalyzed, WorkerWalletSeen: workerWalletSeen, CoinbaseTotalSats: coinbaseTotalSats, WorkerPayoutSats: workerPayoutSats, CoinbaseOutputs: coinbaseOutputs, CoinbaseOutputCount: coinbaseOutputCount, CoinbaseOutputsTruncated: coinbaseOutputsTruncated, CoinbaseOmittedSats: coinbaseOmittedSats, EstimatedPoolFeePct: estimatedPoolFeePct}
 }
 
 func doubleSHA256(data []byte) []byte {
-	first := sha256.Sum256(data)
-	second := sha256.Sum256(first[:])
+	second := doubleSHA256Sum(data)
 	return second[:]
+}
+
+func doubleSHA256Sum(data []byte) [sha256.Size]byte {
+	first := sha256.Sum256(data)
+	return sha256.Sum256(first[:])
 }

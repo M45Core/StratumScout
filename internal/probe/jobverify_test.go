@@ -44,6 +44,48 @@ func TestMalformedMerkleBranchInvalidatesJob(t *testing.T) {
 	}
 }
 
+func TestVerifyJobKeepsZeroRewardArrivalWithoutPayoutEvidence(t *testing.T) {
+	job := Job{
+		PrevHash:        zeroHex(32),
+		Coinbase1:       "0100000001" + zeroHex(32) + "ffffffff0c03a1bb0d",
+		Coinbase2:       "ffffffff01" + zeroHex(8) + "00" + "00000000",
+		Version:         "20000000",
+		Bits:            "17034219",
+		NTime:           "66ad0000",
+		ExtraNonce1:     "01020304",
+		ExtraNonce2Size: 4,
+	}
+	verification := VerifyJob(job)
+	if !verification.Valid || verification.BlockHeight != 900_000 {
+		t.Fatalf("zero-reward job rejected: %+v", verification)
+	}
+	if verification.CoinbaseAnalyzed || verification.CoinbaseTotalSats != 0 || verification.CoinbaseOutputCount != 0 {
+		t.Fatalf("zero-reward payout evidence would violate ingest: %+v", verification)
+	}
+}
+
+func BenchmarkVerifyJob(b *testing.B) {
+	workerScript, _ := hex.DecodeString("76a914111111111111111111111111111111111111111188ac")
+	job := Job{
+		PrevHash:        zeroHex(32),
+		Coinbase1:       "0100000001" + zeroHex(32) + "ffffffff0c03a1bb0d",
+		Coinbase2:       "ffffffff01" + "00f2052a01000000" + "19" + hex.EncodeToString(workerScript) + "00000000",
+		MerkleBranches:  []string{zeroHex(32), zeroHex(32), zeroHex(32)},
+		Version:         "20000000",
+		Bits:            "17034219",
+		NTime:           "66ad0000",
+		ExtraNonce1:     "01020304",
+		ExtraNonce2Size: 4,
+		WorkerScript:    workerScript,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if verification := VerifyJob(job); !verification.Valid {
+			b.Fatal(verification.Errors)
+		}
+	}
+}
+
 func zeroHex(bytes int) string {
 	out := make([]byte, bytes*2)
 	for i := range out {

@@ -1,6 +1,7 @@
 package scout
 
 import (
+	"bytes"
 	"compress/gzip"
 	"context"
 	"crypto/hmac"
@@ -174,6 +175,93 @@ func TestUploaderRetriesMismatchedAcknowledgement(t *testing.T) {
 	}
 }
 
+func TestUploaderStopsAcceptingRecordsAfterContextCancellation(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	collectorURL, _ := url.Parse("https://collector.example")
+	u := newUploader(ctx, Config{CollectorURL: collectorURL}, "run-test", time.Now().UTC(), "sha256:"+strings.Repeat("a", 64))
+	if err := u.enqueue([]model.Observation{{Version: model.ObservationVersion}}); err != nil {
+		t.Fatal(err)
+	}
+	cancel()
+	select {
+	case <-u.done:
+	case <-time.After(time.Second):
+		t.Fatal("uploader did not stop after cancellation")
+	}
+	if err := u.enqueue([]model.Observation{{Version: model.ObservationVersion}}); err == nil {
+		t.Fatal("stopped uploader accepted another observation")
+	}
+	stats := u.closeAndFlush()
+	if stats.Uploaded != 0 || stats.Dropped != 1 || !stats.Failed {
+		t.Fatalf("stats=%+v", stats)
+	}
+}
+
+func TestUploaderSplitsEnvelopesAtCollectorSizeLimits(t *testing.T) {
+	var requests atomic.Int32
+	var oversized atomic.Bool
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		compressed, err := io.ReadAll(io.LimitReader(request.Body, maxCompressedEnvelopeBytes+1))
+		if err != nil || len(compressed) > maxCompressedEnvelopeBytes {
+			oversized.Store(true)
+			http.Error(response, "compressed request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		reader, err := gzip.NewReader(bytes.NewReader(compressed))
+		if err != nil {
+			http.Error(response, "invalid gzip", http.StatusBadRequest)
+			return
+		}
+		decompressed, err := io.ReadAll(io.LimitReader(reader, maxDecompressedEnvelopeBytes+1))
+		_ = reader.Close()
+		if err != nil || len(decompressed) > maxDecompressedEnvelopeBytes {
+			oversized.Store(true)
+			http.Error(response, "decompressed request too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		var got envelope
+		if err := json.Unmarshal(decompressed, &got); err != nil {
+			http.Error(response, "invalid envelope", http.StatusBadRequest)
+			return
+		}
+		requests.Add(1)
+		response.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(response, `{"batch_id":%q,"accepted":%d}`, got.BatchID, len(got.Observations))
+	}))
+	defer server.Close()
+
+	observations := make([]model.Observation, batchSize)
+	for observationIndex := range observations {
+		outputs := make([]model.CoinbaseOutput, model.MaxRetainedCoinbaseOutputs)
+		for outputIndex := range outputs {
+			seed := fmt.Sprintf("%d/%d", observationIndex, outputIndex)
+			first := sha256.Sum256([]byte(seed + "/first"))
+			second := sha256.Sum256([]byte(seed + "/second"))
+			third := sha256.Sum256([]byte(seed + "/third"))
+			script := make([]byte, 0, model.MaxRetainedCoinbaseScriptBytes)
+			script = append(script, first[:]...)
+			script = append(script, second[:]...)
+			script = append(script, third[:16]...)
+			outputs[outputIndex] = model.CoinbaseOutput{ValueSats: 1, ScriptPubKey: hex.EncodeToString(script), ScriptType: "unknown"}
+		}
+		observations[observationIndex] = model.Observation{
+			Version: model.ObservationVersion, ObservedAt: time.Now().UTC(), PoolID: "pool", Endpoint: "pool.example:3333",
+			Eligible: true, Arrived: true, CoinbaseAnalyzed: true, CoinbaseTotalSats: uint64(len(outputs)),
+			CoinbaseOutputs: outputs, CoinbaseOutputCount: len(outputs),
+		}
+	}
+	collectorURL, _ := url.Parse(server.URL)
+	cfg := Config{CollectorURL: collectorURL, KeyID: "current", Secret: []byte(strings.Repeat("k", 32)), Region: "lax", Vantage: "us-west", MachineID: "test", Client: server.Client()}
+	u := newUploader(context.Background(), cfg, "run-test", time.Now().UTC(), "sha256:"+strings.Repeat("a", 64))
+	if err := u.enqueue(observations); err != nil {
+		t.Fatal(err)
+	}
+	stats := u.closeAndFlush()
+	if oversized.Load() || requests.Load() < 2 || stats.Uploaded != len(observations) || stats.Dropped != 0 || stats.Failed {
+		t.Fatalf("requests=%d oversized=%t stats=%+v", requests.Load(), oversized.Load(), stats)
+	}
+}
+
 func TestParseAcceptedRequiresOneCompleteAcknowledgement(t *testing.T) {
 	batchID, accepted, err := parseAccepted(strings.NewReader(`{"batch_id":"run-batch-1","accepted":2}`))
 	if err != nil || batchID != "run-batch-1" || accepted != 2 {
@@ -224,9 +312,10 @@ func BenchmarkEncodeEnvelope(b *testing.B) {
 		ConfigRevision: "sha256:" + strings.Repeat("a", 64), Region: "lax", Vantage: "us-west",
 		MachineID: "machine", StartedAt: started, SentAt: started.Add(time.Minute), Observations: observations,
 	}
+	var compressed bytes.Buffer
 	b.ReportAllocs()
 	for b.Loop() {
-		if _, err := encodeEnvelope(value); err != nil {
+		if _, err := encodeEnvelopeInto(&compressed, value); err != nil {
 			b.Fatal(err)
 		}
 	}

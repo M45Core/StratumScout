@@ -23,17 +23,25 @@ import (
 )
 
 const (
-	batchSize      = 100
-	queueLimit     = 2000
-	batchInterval  = 5 * time.Second
-	initialBackoff = 250 * time.Millisecond
-	maxBackoff     = 5 * time.Second
-	maxRetryAfter  = 30 * time.Second
+	batchSize                    = 100
+	queueLimit                   = 2000
+	batchInterval                = 5 * time.Second
+	initialBackoff               = 250 * time.Millisecond
+	maxBackoff                   = 5 * time.Second
+	maxRetryAfter                = 30 * time.Second
+	maxCompressedEnvelopeBytes   = 256 << 10
+	maxDecompressedEnvelopeBytes = 1 << 20
 )
 
-var envelopeGZIPWriters = sync.Pool{
-	New: func() any { return gzip.NewWriter(io.Discard) },
-}
+var (
+	errEnvelopeTooLarge = errors.New("encoded envelope exceeds collector limits")
+	envelopeGZIPWriters = sync.Pool{
+		New: func() any { return gzip.NewWriter(io.Discard) },
+	}
+	envelopeBuffers = sync.Pool{
+		New: func() any { return new(bytes.Buffer) },
+	}
+)
 
 type envelope struct {
 	SchemaVersion  int                 `json:"schema_version"`
@@ -195,7 +203,7 @@ func (u *uploader) loop(ctx context.Context) {
 	for {
 		select {
 		case <-ctx.Done():
-			u.dropRemaining()
+			u.closeAndDropRemaining()
 			return
 		case <-ticker.C:
 			u.flushOne(ctx)
@@ -206,7 +214,7 @@ func (u *uploader) loop(ctx context.Context) {
 				u.flushOne(ctx)
 			}
 			if ctx.Err() != nil {
-				u.dropRemaining()
+				u.closeAndDropRemaining()
 			}
 			return
 		}
@@ -218,13 +226,32 @@ func (u *uploader) flushOne(ctx context.Context) {
 	if len(batch) == 0 {
 		return
 	}
-	if err := u.postWithRetry(ctx, batch); err != nil {
+	failed := u.uploadRecords(ctx, batch)
+	if failed > 0 {
 		log.Print("upload batch failed permanently")
 		u.mu.Lock()
-		u.dropped += len(batch)
+		u.dropped += failed
 		u.failed = true
 		u.mu.Unlock()
 	}
+}
+
+func (u *uploader) uploadRecords(ctx context.Context, records []model.Observation) int {
+	if len(records) == 0 {
+		return 0
+	}
+	if ctx.Err() != nil {
+		return len(records)
+	}
+	err := u.postWithRetry(ctx, records)
+	if errors.Is(err, errEnvelopeTooLarge) && len(records) > 1 {
+		middle := len(records) / 2
+		return u.uploadRecords(ctx, records[:middle]) + u.uploadRecords(ctx, records[middle:])
+	}
+	if err != nil {
+		return len(records)
+	}
+	return 0
 }
 
 func (u *uploader) takeBatch() []model.Observation {
@@ -239,8 +266,9 @@ func (u *uploader) pending() int {
 	return u.queue.size
 }
 
-func (u *uploader) dropRemaining() {
+func (u *uploader) closeAndDropRemaining() {
 	u.mu.Lock()
+	u.closed = true
 	dropped := u.queue.clear()
 	u.dropped += dropped
 	u.failed = u.failed || dropped > 0
@@ -279,7 +307,15 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 	batchID := u.runID + "-batch-" + strconv.FormatUint(u.batchSequence, 10)
 	u.mu.Unlock()
 	sentAt := time.Now().UTC()
-	payload, err := encodeEnvelope(envelope{
+	compressed := envelopeBuffers.Get().(*bytes.Buffer)
+	compressed.Reset()
+	defer func() {
+		if compressed.Cap() <= maxCompressedEnvelopeBytes {
+			compressed.Reset()
+			envelopeBuffers.Put(compressed)
+		}
+	}()
+	uncompressedBytes, err := encodeEnvelopeInto(compressed, envelope{
 		SchemaVersion:  1,
 		BatchID:        batchID,
 		RunID:          u.runID,
@@ -294,6 +330,10 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 	})
 	if err != nil {
 		return err
+	}
+	payload := compressed.Bytes()
+	if len(payload) > maxCompressedEnvelopeBytes || uncompressedBytes > maxDecompressedEnvelopeBytes {
+		return fmt.Errorf("%w: compressed=%d decompressed=%d", errEnvelopeTooLarge, len(payload), uncompressedBytes)
 	}
 	backoff := initialBackoff
 	for {
@@ -336,22 +376,34 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 	}
 }
 
-func encodeEnvelope(value envelope) ([]byte, error) {
-	var compressed bytes.Buffer
+type countingWriter struct {
+	writer  io.Writer
+	written int
+}
+
+func (w *countingWriter) Write(value []byte) (int, error) {
+	count, err := w.writer.Write(value)
+	w.written += count
+	return count, err
+}
+
+func encodeEnvelopeInto(compressed *bytes.Buffer, value envelope) (int, error) {
+	compressed.Reset()
 	writer := envelopeGZIPWriters.Get().(*gzip.Writer)
-	writer.Reset(&compressed)
+	writer.Reset(compressed)
 	defer func() {
 		writer.Reset(io.Discard)
 		envelopeGZIPWriters.Put(writer)
 	}()
-	if err := json.NewEncoder(writer).Encode(value); err != nil {
+	counter := &countingWriter{writer: writer}
+	if err := json.NewEncoder(counter).Encode(value); err != nil {
 		_ = writer.Close()
-		return nil, err
+		return counter.written, err
 	}
 	if err := writer.Close(); err != nil {
-		return nil, err
+		return counter.written, err
 	}
-	return compressed.Bytes(), nil
+	return counter.written, nil
 }
 
 func (u *uploader) post(ctx context.Context, payload []byte) (postResult, error) {

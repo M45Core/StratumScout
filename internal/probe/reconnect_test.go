@@ -3,6 +3,7 @@ package probe
 import (
 	"errors"
 	"testing"
+	"time"
 )
 
 func TestExplicitPoolRejectionIsNotRetried(t *testing.T) {
@@ -14,5 +15,16 @@ func TestExplicitPoolRejectionIsNotRetried(t *testing.T) {
 	}
 	if shouldRetry(errors.Join(errors.New("authorization failed"), errPoolRejected)) {
 		t.Fatal("wrapped pool rejection should not be retried")
+	}
+}
+
+func TestReconnectBackoffResetsAfterEstablishedSession(t *testing.T) {
+	delay, next := advanceReconnectBackoff(reconnectBackoffMax, true)
+	if delay != reconnectBackoffMin || next != 2*reconnectBackoffMin {
+		t.Fatalf("reset backoff delay=%s next=%s", delay, next)
+	}
+	delay, next = advanceReconnectBackoff(30*time.Second, false)
+	if delay != 30*time.Second || next != reconnectBackoffMax {
+		t.Fatalf("continued backoff delay=%s next=%s", delay, next)
 	}
 }

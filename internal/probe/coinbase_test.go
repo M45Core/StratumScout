@@ -9,7 +9,7 @@ import (
 
 func TestAnalyzeCoinbaseFindsWorkerOutputs(t *testing.T) {
 	workerScript, _ := hex.DecodeString("76a914111111111111111111111111111111111111111188ac")
-	raw, _ := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff0100ffffffff01" + "00f2052a01000000" + "19" + hex.EncodeToString(workerScript) + "00000000")
+	raw, _ := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff020101ffffffff01" + "00f2052a01000000" + "19" + hex.EncodeToString(workerScript) + "00000000")
 	summary, err := analyzeCoinbase(raw, workerScript)
 	if err != nil {
 		t.Fatal(err)
@@ -21,7 +21,7 @@ func TestAnalyzeCoinbaseFindsWorkerOutputs(t *testing.T) {
 
 func TestAnalyzeWitnessCoinbase(t *testing.T) {
 	workerScript, _ := hex.DecodeString("76a914222222222222222222222222222222222222222288ac")
-	raw, _ := hex.DecodeString("02000000000101" + zeroHex(32) + "ffffffff0100ffffffff01" + "0100000000000000" + "19" + hex.EncodeToString(workerScript) + "0120" + zeroHex(32) + "00000000")
+	raw, _ := hex.DecodeString("02000000000101" + zeroHex(32) + "ffffffff020101ffffffff01" + "0100000000000000" + "19" + hex.EncodeToString(workerScript) + "0120" + zeroHex(32) + "00000000")
 	summary, err := analyzeCoinbase(raw, workerScript)
 	if err != nil {
 		t.Fatal(err)
@@ -32,9 +32,45 @@ func TestAnalyzeWitnessCoinbase(t *testing.T) {
 }
 
 func TestAnalyzeCoinbaseRejectsTrailingData(t *testing.T) {
-	raw, _ := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff0100ffffffff0100000000000000000000000000ff")
+	raw, _ := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff020101ffffffff0101000000000000000000000000ff")
 	if _, err := analyzeCoinbase(raw, nil); err == nil {
 		t.Fatal("accepted trailing data")
+	}
+}
+
+func TestAnalyzeCoinbaseRejectsNonCoinbaseTransactions(t *testing.T) {
+	validInput := "01" + zeroHex(32) + "ffffffff020101ffffffff"
+	validOutput := "0101000000000000000000000000"
+	for name, transaction := range map[string]string{
+		"multiple inputs":        "0100000002",
+		"non-null previous hash": "0100000001" + "01" + zeroHex(31) + "ffffffff020101ffffffff" + validOutput,
+		"short coinbase script":  "0100000001" + zeroHex(32) + "ffffffff0101ffffffff" + validOutput,
+		"unknown witness flag":   "010000000002" + validInput + validOutput,
+		"excessive output value": "01000000" + validInput + "01" + "010040075af07500" + "00" + "00000000",
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := hex.DecodeString(transaction)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := analyzeCoinbase(raw, nil); err == nil {
+				t.Fatal("malformed coinbase transaction was accepted")
+			}
+		})
+	}
+}
+
+func TestAnalyzeCoinbaseAllowsUnclaimedReward(t *testing.T) {
+	raw, err := hex.DecodeString("01000000" + "01" + zeroHex(32) + "ffffffff020101ffffffff" + "01" + zeroHex(8) + "00" + "00000000")
+	if err != nil {
+		t.Fatal(err)
+	}
+	summary, err := analyzeCoinbase(raw, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.TotalSats != 0 || summary.OutputCount != 1 {
+		t.Fatalf("summary=%+v", summary)
 	}
 }
 
@@ -75,8 +111,8 @@ func TestAnalyzeCoinbaseBoundsRetainedDestinations(t *testing.T) {
 	if err := binary.Write(&raw, binary.LittleEndian, uint32(0xffffffff)); err != nil {
 		t.Fatal(err)
 	}
-	raw.WriteByte(1)
-	raw.WriteByte(0)
+	raw.WriteByte(2)
+	raw.Write([]byte{1, 1})
 	if err := binary.Write(&raw, binary.LittleEndian, uint32(0xffffffff)); err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +145,7 @@ func TestAnalyzeCoinbaseDoesNotTreatZeroValueWorkerScriptAsPayout(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff0100ffffffff01" + "0000000000000000" + "19" + hex.EncodeToString(workerScript) + "00000000")
+	raw, err := hex.DecodeString("0100000001" + zeroHex(32) + "ffffffff020101ffffffff02" + "0000000000000000" + "19" + hex.EncodeToString(workerScript) + "0100000000000000" + "01" + "51" + "00000000")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -117,7 +153,16 @@ func TestAnalyzeCoinbaseDoesNotTreatZeroValueWorkerScriptAsPayout(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	if summary.WorkerWalletSeen || summary.WorkerSats != 0 || len(summary.Outputs) != 0 {
+	if summary.WorkerWalletSeen || summary.WorkerSats != 0 || summary.TotalSats != 1 || len(summary.Outputs) != 1 {
 		t.Fatalf("zero-value worker script counted as payout: %+v", summary)
+	}
+}
+
+func TestDecodeCoinbaseHeightRequiresMinimalScriptNumber(t *testing.T) {
+	if _, ok := decodeCoinbaseHeight([]byte{2, 1, 0}); ok {
+		t.Fatal("non-minimal block height was accepted")
+	}
+	if height, ok := decodeCoinbaseHeight([]byte{2, 0x80, 0}); !ok || height != 128 {
+		t.Fatalf("minimal positive block height decoded as %d, %t", height, ok)
 	}
 }
