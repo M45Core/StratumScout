@@ -48,6 +48,18 @@ type CoinbaseOutput struct {
 	Worker bool `json:"worker,omitempty"`
 }
 
+// CoinbaseSource is the minimum session context StratumStats needs to rebuild
+// the first coinbase seen from an endpoint for a block. Scout forwards these
+// strings without decoding the transaction; the collector retains only the
+// webpage-facing evidence derived from them.
+type CoinbaseSource struct {
+	Coinbase1          string `json:"coinbase1"`
+	Coinbase2          string `json:"coinbase2"`
+	ExtraNonce1        string `json:"extranonce1"`
+	ExtraNonce2Size    int    `json:"extranonce2_size"`
+	WorkerScriptSHA256 string `json:"worker_script_sha256"`
+}
+
 // CoinbaseEvidence is the optional payout evidence retained for one endpoint
 // in a completed block sample. Its presence means the coinbase was decoded.
 type CoinbaseEvidence struct {
@@ -95,8 +107,9 @@ type ForwardedEndpointSample struct {
 	Endpoint string `json:"endpoint"`
 	TLS      bool   `json:"tls,omitempty"`
 
-	ReceivedAt *time.Time     `json:"received_at,omitempty"`
-	Setup      *EndpointSetup `json:"setup,omitempty"`
+	ReceivedAt *time.Time      `json:"received_at,omitempty"`
+	Setup      *EndpointSetup  `json:"setup,omitempty"`
+	Coinbase   *CoinbaseSource `json:"coinbase,omitempty"`
 }
 
 // BlockSample is the complete Scout upload payload for one Bitcoin block.

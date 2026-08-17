@@ -9,9 +9,10 @@ The probe is stateless. It cannot submit mining shares and has no listener,
 database, volume, or durable local state.
 
 Long-lived state is explicitly bounded. Scout retains at most one pending setup
-result per operation and endpoint, no more than 32 active block windows for 30
-seconds, endpoint and session maps no larger than the validated configuration,
-and only the latest 256 completed block IDs. It has no timed upload buffer.
+result per operation and endpoint, one coinbase source per observed endpoint in
+no more than 32 active block windows for 30 seconds, endpoint and session maps
+no larger than the validated configuration, and only the latest 256 completed
+block IDs. It has no timed upload buffer.
 
 ## Operating modes
 
@@ -21,8 +22,8 @@ By default, the process stays connected continuously. For each Bitcoin block it:
 2. timestamps the first clean previous-block-hash transition from each endpoint
    as soon as the message's first byte is readable;
 3. keeps the block window open for 30 seconds from the first observation;
-4. places those timestamps and any pending setup timings into one nested block
-   sample; and
+4. places those timestamps, the webpage-required coinbase source, and any
+   pending setup timings into one nested block sample; and
 5. makes one authenticated collector request for that sample.
 
 If Bitcoin blocks arrive less than 30 seconds apart, their overlapping windows
@@ -47,12 +48,16 @@ off to 15 minutes and reset only after a session remains stable for 10 minutes.
 
 Scout timestamps each Stratum message as soon as its first byte is readable,
 before waiting for the remaining bytes and before JSON parsing. For
-`mining.notify`, it extracts only the previous-block hash and `clean_jobs` flag;
-coinbase, merkle, version, difficulty, time, and extranonce fields are neither
-decoded nor uploaded. Same-hash job updates are ignored regardless of
-transaction changes. StratumStats calculates relative arrival offsets after
-authenticated ingest. Protocol response timings use the same first-byte
-boundary so message length and parsing work are not attributed to the pool.
+`mining.notify`, it extracts the previous-block hash and `clean_jobs` flag.
+Only after accepting a new block does it copy `coinbase1` and `coinbase2` into
+the block sample with the subscribed extranonce context and a SHA-256 hash of
+the generated worker output script. It does not decode the transaction or
+retain merkle branches, version, difficulty, time, or other job fields.
+Same-hash job updates are ignored without copying their coinbases.
+StratumStats derives the webpage's height, payout, and solo-fee fields and
+calculates relative arrival offsets after authenticated ingest. Protocol
+response timings use the same first-byte boundary so message length and parsing
+work are not attributed to the pool.
 
 ## Configuration
 

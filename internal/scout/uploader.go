@@ -20,15 +20,16 @@ import (
 )
 
 const (
-	blockEnvelopeVersion         = 2
+	blockEnvelopeVersion         = 3
 	maxCompressedEnvelopeBytes   = 256 << 10
 	maxDecompressedEnvelopeBytes = 1 << 20
 )
 
 var errEnvelopeTooLarge = errors.New("encoded block sample exceeds collector limits")
 
-// envelope version 2 carries one Bitcoin block sample. There is deliberately
-// no observation array, run summary, queue sequence, or time-based batch.
+// Envelope version 3 carries one Bitcoin block sample plus only the coinbase
+// source needed by the webpage. There is deliberately no observation array,
+// run summary, queue sequence, or time-based batch.
 type envelope struct {
 	SchemaVersion    int               `json:"schema_version"`
 	BatchID          string            `json:"batch_id"`

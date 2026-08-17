@@ -39,6 +39,7 @@ type event struct {
 	poolID, prevHash string
 	connectionID     string
 	at               time.Time
+	coinbase         *model.CoinbaseSource
 	protocolMethod   string
 	protocol         *model.ProtocolSample
 }
@@ -50,10 +51,11 @@ type endpointTarget struct {
 }
 
 type activeBlock struct {
-	id       string
-	started  time.Time
-	eligible map[string]endpointTarget
-	arrivals map[string]time.Time
+	id        string
+	started   time.Time
+	eligible  map[string]endpointTarget
+	arrivals  map[string]time.Time
+	coinbases map[string]model.CoinbaseSource
 }
 
 // Collect connects to every configured endpoint and emits exactly one nested
@@ -246,6 +248,10 @@ func blockSample(block *activeBlock, pendingSetup map[string]model.EndpointSetup
 		if arrived {
 			receivedAt := at.UTC()
 			endpointSample.ReceivedAt = &receivedAt
+			if coinbase, ok := block.coinbases[id]; ok {
+				coinbaseCopy := coinbase
+				endpointSample.Coinbase = &coinbaseCopy
+			}
 		}
 		if setup, ok := pendingSetup[id]; ok {
 			setupCopy := setup
@@ -297,7 +303,10 @@ func activeBlockForEvent(blocks map[string]*activeBlock, completed map[string]bo
 	if e.prevHash == "" || len(blocks) >= activeBlockLimit {
 		return nil
 	}
-	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}}
+	block := &activeBlock{
+		id: e.prevHash, started: e.at,
+		eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}, coinbases: map[string]model.CoinbaseSource{},
+	}
 	for id, target := range configured {
 		block.eligible[id] = target
 	}
@@ -444,7 +453,10 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 		if !window.accept(prev, msg.Params.clean) {
 			continue
 		}
-		e := event{poolID: poolID, connectionID: connectionID, prevHash: prev, at: receivedAt}
+		e := event{
+			poolID: poolID, connectionID: connectionID, prevHash: prev, at: receivedAt,
+			coinbase: msg.Params.coinbaseSource(extraNonce1, extraNonce2Size, identity.WorkerScriptSHA256),
+		}
 		select {
 		case out <- e:
 		case <-ctx.Done():
@@ -459,13 +471,16 @@ type stratumNotification struct {
 	Params notifyParams `json:"params"`
 }
 
-// notifyParams extracts only the previous-block hash and clean-jobs flag. The
-// other mining.notify parameters can contain a large coinbase and merkle branch
-// list; Scout never needs to decode or retain them.
+// notifyParams extracts the previous-block hash and clean-jobs flag while
+// retaining zero-copy slices for the two coinbase strings. Those strings are
+// decoded only after a new block transition is accepted, so same-block job
+// updates do not allocate or copy their potentially large coinbases.
 type notifyParams struct {
-	previousHash string
-	clean        bool
-	count        int
+	previousHash  string
+	clean         bool
+	count         int
+	coinbase1JSON []byte
+	coinbase2JSON []byte
 }
 
 func (params *notifyParams) UnmarshalJSON(data []byte) error {
@@ -488,6 +503,10 @@ func (params *notifyParams) UnmarshalJSON(data []byte) error {
 			if err := json.Unmarshal(value, &params.previousHash); err != nil {
 				return err
 			}
+		case 2:
+			params.coinbase1JSON = value
+		case 3:
+			params.coinbase2JSON = value
 		case 8:
 			if err := json.Unmarshal(value, &params.clean); err != nil {
 				return err
@@ -546,6 +565,21 @@ func (params *notifyParams) UnmarshalJSON(data []byte) error {
 	return errors.New("unterminated Stratum parameter array")
 }
 
+func (params notifyParams) coinbaseSource(extraNonce1 string, extraNonce2Size int, workerScriptSHA256 string) *model.CoinbaseSource {
+	if len(params.coinbase1JSON) == 0 || len(params.coinbase2JSON) == 0 || extraNonce1 == "" || extraNonce2Size <= 0 || workerScriptSHA256 == "" {
+		return nil
+	}
+	var coinbase1, coinbase2 string
+	if json.Unmarshal(params.coinbase1JSON, &coinbase1) != nil || json.Unmarshal(params.coinbase2JSON, &coinbase2) != nil || coinbase1 == "" || coinbase2 == "" {
+		return nil
+	}
+	return &model.CoinbaseSource{
+		Coinbase1: coinbase1, Coinbase2: coinbase2,
+		ExtraNonce1: extraNonce1, ExtraNonce2Size: extraNonce2Size,
+		WorkerScriptSHA256: workerScriptSHA256,
+	}
+}
+
 func validBlockHash(value string) bool {
 	if len(value) != 64 {
 		return false
@@ -596,6 +630,14 @@ func recordBlockEvent(block *activeBlock, e event) {
 	}
 	if old, exists := block.arrivals[id]; !exists || e.at.Before(old) {
 		block.arrivals[id] = e.at
+		if e.coinbase != nil {
+			if block.coinbases == nil {
+				block.coinbases = make(map[string]model.CoinbaseSource)
+			}
+			block.coinbases[id] = *e.coinbase
+		} else {
+			delete(block.coinbases, id)
+		}
 	}
 }
 

@@ -1,6 +1,7 @@
 package probe
 
 import (
+	"encoding/hex"
 	"regexp"
 	"strings"
 	"testing"
@@ -13,7 +14,8 @@ func TestRandomIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Username) < 30 || a.Agent == "" {
+	workerHash, hashErr := hex.DecodeString(a.WorkerScriptSHA256)
+	if len(a.Username) < 30 || a.Agent == "" || hashErr != nil || len(workerHash) != 32 {
 		t.Fatalf("bad identity: %+v", a)
 	}
 	b, err := RandomIdentity()

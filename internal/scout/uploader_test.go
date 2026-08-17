@@ -210,6 +210,42 @@ func TestBlockEnvelopeOmitsUnavailableFields(t *testing.T) {
 	}
 }
 
+func TestBlockEnvelopeCarriesOnlyCoinbaseReconstructionSource(t *testing.T) {
+	var compressed bytes.Buffer
+	sample := testBlockSample(time.Now().UTC())
+	sample.EndpointSamples[0].Coinbase = &model.CoinbaseSource{
+		Coinbase1: "0102", Coinbase2: "0304", ExtraNonce1: "0506", ExtraNonce2Size: 4,
+		WorkerScriptSHA256: strings.Repeat("a", 64),
+	}
+	_, err := encodeEnvelopeInto(&compressed, envelope{
+		SchemaVersion: blockEnvelopeVersion, BatchID: "lax-" + sample.BlockID,
+		ConfigRevision: "sha256:" + strings.Repeat("a", 64),
+		Region:         "lax", Sample: sample,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader, err := gzip.NewReader(bytes.NewReader(compressed.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := io.ReadAll(reader)
+	_ = reader.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, present := range []string{`"coinbase1":"0102"`, `"coinbase2":"0304"`, `"extranonce1":"0506"`, `"extranonce2_size":4`, `"worker_script_sha256":"`} {
+		if !bytes.Contains(raw, []byte(present)) {
+			t.Fatalf("coinbase source missing %s: %s", present, raw)
+		}
+	}
+	for _, absent := range []string{`"merkle"`, `"version"`, `"bits"`, `"ntime"`, `"job_id"`, `"valid"`} {
+		if bytes.Contains(raw, []byte(absent)) {
+			t.Fatalf("unneeded job field %s was serialized: %s", absent, raw)
+		}
+	}
+}
+
 func TestParseAcceptedRequiresOneCompleteAcknowledgement(t *testing.T) {
 	batchID, accepted, err := parseAccepted(strings.NewReader(`{"batch_id":"block","accepted":1}`))
 	if err != nil || batchID != "block" || accepted != 1 {

@@ -22,7 +22,7 @@ func TestNotifyWindowIgnoresStartupBlockUpdates(t *testing.T) {
 	}
 }
 
-func TestStratumNotificationExtractsOnlyBlockTransitionFields(t *testing.T) {
+func TestStratumNotificationDefersCoinbaseCopyUntilAcceptedBlock(t *testing.T) {
 	blockID, message := largeNotifyMessage()
 	var got stratumNotification
 	if err := json.Unmarshal([]byte(message), &got); err != nil {
@@ -30,6 +30,10 @@ func TestStratumNotificationExtractsOnlyBlockTransitionFields(t *testing.T) {
 	}
 	if got.Method != "mining.notify" || got.Params.previousHash != blockID || !got.Params.clean || got.Params.count != 9 {
 		t.Fatalf("notification=%+v params=%+v", got, got.Params)
+	}
+	source := got.Params.coinbaseSource("01020304", 4, strings.Repeat("f", 64))
+	if source == nil || len(source.Coinbase1) != 64_000 || source.Coinbase2 != "coinbase2" || source.ExtraNonce1 != "01020304" || source.ExtraNonce2Size != 4 {
+		t.Fatalf("coinbase source=%+v", source)
 	}
 }
 

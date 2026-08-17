@@ -23,6 +23,24 @@ func TestFirstCandidateCountsAsArrival(t *testing.T) {
 	}
 }
 
+func TestFirstCandidateCarriesCoinbaseIntoBlockSample(t *testing.T) {
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	source := &model.CoinbaseSource{
+		Coinbase1: "01", Coinbase2: "02", ExtraNonce1: "03", ExtraNonce2Size: 4,
+		WorkerScriptSHA256: "04",
+	}
+	block := &activeBlock{
+		id: "block", eligible: map[string]endpointTarget{"pool": {poolID: "pool", address: "pool.example:3333"}},
+		arrivals: map[string]time.Time{}, coinbases: map[string]model.CoinbaseSource{},
+	}
+	recordBlockEvent(block, event{poolID: "pool", prevHash: "block", at: started, coinbase: source})
+
+	sample, ok := blockSample(block, nil)
+	if !ok || len(sample.EndpointSamples) != 1 || sample.EndpointSamples[0].Coinbase == nil || sample.EndpointSamples[0].Coinbase.Coinbase1 != "01" {
+		t.Fatalf("block sample=%+v ok=%t", sample, ok)
+	}
+}
+
 func TestEventWithoutBlockHashDoesNotBecomeArrival(t *testing.T) {
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{

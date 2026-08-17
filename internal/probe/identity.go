@@ -3,6 +3,7 @@ package probe
 import (
 	"crypto/rand"
 	"crypto/sha256"
+	"encoding/hex"
 	"fmt"
 	"math/big"
 	"strings"
@@ -157,9 +158,10 @@ var rentalWorkerRoots = []string{
 }
 
 type Identity struct {
-	Username  string
-	Agent     string
-	wireStyle stratumWireStyle
+	Username           string
+	Agent              string
+	WorkerScriptSHA256 string
+	wireStyle          stratumWireStyle
 }
 
 func RandomIdentity() (Identity, error) {
@@ -171,6 +173,11 @@ func RandomIdentity() (Identity, error) {
 	first := sha256.Sum256(payload)
 	second := sha256.Sum256(first[:])
 	address := base58(append(payload, second[:4]...))
+	payoutScript := make([]byte, 0, 25)
+	payoutScript = append(payoutScript, 0x76, 0xa9, 0x14)
+	payoutScript = append(payoutScript, payload[1:]...)
+	payoutScript = append(payoutScript, 0x88, 0xac)
+	payoutScriptHash := sha256.Sum256(payoutScript)
 	preset, err := randomPreset()
 	if err != nil {
 		return Identity{}, err
@@ -187,7 +194,11 @@ func RandomIdentity() (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return Identity{Username: username, Agent: agent, wireStyle: stratumWireStyleForAgent(agent)}, nil
+	return Identity{
+		Username: username, Agent: agent,
+		WorkerScriptSHA256: hex.EncodeToString(payoutScriptHash[:]),
+		wireStyle:          stratumWireStyleForAgent(agent),
+	}, nil
 }
 
 type stratumWireStyle uint8
