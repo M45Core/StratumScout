@@ -32,6 +32,18 @@ func TestVerifyJob(t *testing.T) {
 	}
 }
 
+func TestMalformedMerkleBranchInvalidatesJob(t *testing.T) {
+	workerScript, _ := hex.DecodeString("76a914111111111111111111111111111111111111111188ac")
+	coinbase1 := "0100000001" + zeroHex(32) + "ffffffff0c03a1bb0d"
+	coinbase2 := "ffffffff01" + "00f2052a01000000" + "19" + hex.EncodeToString(workerScript) + "00000000"
+	for _, value := range []any{[]any{zeroHex(32), float64(1)}, "not-an-array"} {
+		j := Job{PrevHash: zeroHex(32), Coinbase1: coinbase1, Coinbase2: coinbase2, MerkleBranches: parseMerkleBranches(value), Version: "20000000", Bits: "17034219", NTime: "66ad0000", ExtraNonce1: "01020304", ExtraNonce2Size: 4, WorkerScript: workerScript}
+		if VerifyJob(j).Valid {
+			t.Fatalf("malformed merkle branches %v were silently discarded", value)
+		}
+	}
+}
+
 func zeroHex(bytes int) string {
 	out := make([]byte, bytes*2)
 	for i := range out {

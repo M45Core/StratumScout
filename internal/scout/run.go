@@ -65,8 +65,11 @@ func runContinuously(ctx context.Context, cfg Config, run func(context.Context, 
 }
 
 func Run(ctx context.Context, cfg Config) error {
-	hardCtx, hardCancel := context.WithCancel(ctx)
-	if !cfg.Continuous {
+	var hardCtx context.Context
+	var hardCancel context.CancelFunc
+	if cfg.Continuous {
+		hardCtx, hardCancel = context.WithCancel(ctx)
+	} else {
 		hardCtx, hardCancel = context.WithTimeout(ctx, cfg.RunFor+45*time.Second)
 	}
 	defer hardCancel()
@@ -74,37 +77,41 @@ func Run(ctx context.Context, cfg Config) error {
 	if err != nil {
 		return err
 	}
-	var runID string
-	var startedAt time.Time
-	var upload *uploader
-	measureCtx, measureCancel := context.WithCancel(hardCtx)
-	if !cfg.Continuous {
+	var measureCtx context.Context
+	var measureCancel context.CancelFunc
+	if cfg.Continuous {
+		measureCtx, measureCancel = context.WithCancel(hardCtx)
+	} else {
 		measureCtx, measureCancel = context.WithTimeout(hardCtx, cfg.RunFor)
 	}
 	defer measureCancel()
 
 	successful := make(map[string]bool)
-	blocks := make(map[string]bool)
-	startCohort := func() error {
-		var err error
-		runID, err = randomID()
+	type reportingCohort struct {
+		runID          string
+		startedAt      time.Time
+		upload         *uploader
+		acceptedBlocks int
+	}
+	startCohort := func(startedAt time.Time) (*reportingCohort, error) {
+		runID, err := randomID()
 		if err != nil {
-			return err
+			return nil, err
 		}
-		startedAt = time.Now().UTC()
-		upload = newUploader(hardCtx, cfg, runID, startedAt, remote.ConfigRevision)
-		blocks = make(map[string]bool)
+		if startedAt.IsZero() {
+			startedAt = time.Now().UTC()
+		}
+		cohort := &reportingCohort{runID: runID, startedAt: startedAt.UTC()}
+		cohort.upload = newUploader(hardCtx, cfg, cohort.runID, cohort.startedAt, remote.ConfigRevision)
 		mode := "continuous"
 		if !cfg.Continuous {
 			mode = cfg.RunFor.String()
 		}
-		log.Printf("probe run=%s region=%s vantage=%s endpoints=%d mode=%s", runID, cfg.Region, cfg.Vantage, endpointCount(pools), mode)
-		return nil
+		log.Printf("probe run=%s region=%s vantage=%s endpoints=%d mode=%s", cohort.runID, cfg.Region, cfg.Vantage, endpointCount(pools), mode)
+		return cohort, nil
 	}
-	completeCohort := func(status string) error {
-		currentUpload := upload
-		upload = nil
-		stats := currentUpload.closeAndFlush()
+	completeCohort := func(cohort *reportingCohort, status string) error {
+		stats := cohort.upload.closeAndFlush()
 		if status == "ok" && (stats.Failed || stats.Dropped > 0) {
 			status = "partial"
 		}
@@ -114,41 +121,47 @@ func Run(ctx context.Context, cfg Config) error {
 			RecordType:           model.RecordTypeProbeRun,
 			ObservedAt:           now,
 			Vantage:              cfg.Vantage,
-			RunStartedAt:         &startedAt,
+			RunStartedAt:         &cohort.startedAt,
 			RunStatus:            status,
 			ConfiguredEndpoints:  endpointCount(pools),
 			SuccessfulSessions:   len(successful),
-			AcceptedBlocks:       len(blocks),
+			AcceptedBlocks:       cohort.acceptedBlocks,
 			UploadedObservations: stats.Uploaded,
 			DroppedObservations:  stats.Dropped,
 		}
-		if err := currentUpload.uploadFinal(hardCtx, final); err != nil {
+		if err := cohort.upload.uploadFinal(hardCtx, final); err != nil {
 			return fmt.Errorf("upload final probe status: %w", err)
 		}
-		log.Printf("probe run=%s status=%s sessions=%d blocks=%d uploaded=%d dropped=%d", runID, status, len(successful), len(blocks), stats.Uploaded+1, stats.Dropped)
+		log.Printf("probe run=%s status=%s sessions=%d blocks=%d uploaded=%d dropped=%d", cohort.runID, status, len(successful), cohort.acceptedBlocks, stats.Uploaded+1, stats.Dropped)
 		return nil
 	}
-	if err := startCohort(); err != nil {
+	current, err := startCohort(time.Time{})
+	if err != nil {
 		return err
 	}
-	emit := func(records []model.Observation) error {
+	emit := func(records []model.Observation, nextStartedAt time.Time) error {
 		finalizedBlock := hasFinalizedBlock(records)
 		for _, record := range records {
 			if record.RecordType == model.RecordTypeProtocol && record.ProtocolMethod == model.ProtocolAuthorize && record.ResponseStatus == model.ProtocolStatusOK {
 				successful[record.PoolID+"\x00"+record.Endpoint+"\x00"+strconv.FormatBool(record.TLS)] = true
 			}
-			if record.RecordType == "" && record.Arrived && record.BlockID != "" {
-				blocks[record.BlockID] = true
-			}
 		}
-		if err := upload.enqueue(records); err != nil {
+		if finalizedBlock {
+			current.acceptedBlocks++
+		}
+		if err := current.upload.enqueue(records); err != nil {
 			return err
 		}
-		if cfg.Continuous && finalizedBlock {
-			if err := completeCohort("ok"); err != nil {
+		if cfg.Continuous && !nextStartedAt.IsZero() {
+			completed := current
+			next, err := startCohort(nextStartedAt)
+			if err != nil {
 				return err
 			}
-			return startCohort()
+			current = next
+			if err := completeCohort(completed, "ok"); err != nil {
+				return err
+			}
 		}
 		return nil
 	}
@@ -162,8 +175,8 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Print("refreshing Stratum sessions after maximum connection age")
 	}
 	if cfg.Continuous && ctx.Err() != nil {
-		if upload != nil {
-			upload.closeAndFlush()
+		if current != nil {
+			current.upload.closeAndFlush()
 		}
 		return nil
 	}
@@ -173,8 +186,8 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Print("collector stopped unexpectedly")
 		status = "error"
 	}
-	if upload != nil {
-		if err := completeCohort(status); err != nil {
+	if current != nil {
+		if err := completeCohort(current, status); err != nil {
 			return err
 		}
 	}

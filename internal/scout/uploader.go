@@ -56,9 +56,78 @@ type uploadStats struct {
 }
 
 type postResult struct {
+	batchID    string
 	accepted   int
 	retry      bool
 	retryAfter time.Duration
+}
+
+type observationQueue struct {
+	entries []model.Observation
+	head    int
+	size    int
+}
+
+func (q *observationQueue) push(record model.Observation) bool {
+	if q.size == queueLimit {
+		q.entries[q.head] = record
+		q.head = (q.head + 1) % len(q.entries)
+		return true
+	}
+	if q.size == len(q.entries) {
+		capacity := len(q.entries) * 2
+		if capacity < batchSize {
+			capacity = batchSize
+		}
+		if capacity > queueLimit {
+			capacity = queueLimit
+		}
+		grown := make([]model.Observation, capacity)
+		q.copyOldest(grown[:q.size])
+		q.entries = grown
+		q.head = 0
+	}
+	index := (q.head + q.size) % len(q.entries)
+	q.entries[index] = record
+	q.size++
+	return false
+}
+
+func (q *observationQueue) pop(count int) []model.Observation {
+	if count > q.size {
+		count = q.size
+	}
+	if count == 0 {
+		return nil
+	}
+	batch := make([]model.Observation, count)
+	q.copyOldest(batch)
+	for index := range count {
+		q.entries[(q.head+index)%len(q.entries)] = model.Observation{}
+	}
+	q.head = (q.head + count) % len(q.entries)
+	q.size -= count
+	if q.size == 0 {
+		q.head = 0
+	}
+	return batch
+}
+
+func (q *observationQueue) copyOldest(destination []model.Observation) {
+	if len(destination) == 0 {
+		return
+	}
+	first := min(len(destination), len(q.entries)-q.head)
+	copy(destination, q.entries[q.head:q.head+first])
+	copy(destination[first:], q.entries[:len(destination)-first])
+}
+
+func (q *observationQueue) clear() int {
+	count := q.size
+	q.entries = nil
+	q.head = 0
+	q.size = 0
+	return count
 }
 
 type uploader struct {
@@ -71,7 +140,7 @@ type uploader struct {
 	stop          chan struct{}
 	done          chan struct{}
 	mu            sync.Mutex
-	queue         []model.Observation
+	queue         observationQueue
 	sequence      uint64
 	batchSequence uint64
 	uploaded      int
@@ -105,16 +174,12 @@ func (u *uploader) enqueue(records []model.Observation) error {
 		u.sequence++
 		record.ObservationID = sequenceID(u.runID, u.sequence)
 		record.RunID = u.runID
-		if len(u.queue) == queueLimit {
-			copy(u.queue, u.queue[1:])
-			u.queue[len(u.queue)-1] = record
+		if u.queue.push(record) {
 			u.dropped++
 			u.failed = true
-		} else {
-			u.queue = append(u.queue, record)
 		}
 	}
-	if len(u.queue) >= batchSize {
+	if u.queue.size >= batchSize {
 		select {
 		case u.wake <- struct{}{}:
 		default:
@@ -165,27 +230,20 @@ func (u *uploader) flushOne(ctx context.Context) {
 func (u *uploader) takeBatch() []model.Observation {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	count := len(u.queue)
-	if count > batchSize {
-		count = batchSize
-	}
-	batch := append([]model.Observation(nil), u.queue[:count]...)
-	copy(u.queue, u.queue[count:])
-	u.queue = u.queue[:len(u.queue)-count]
-	return batch
+	return u.queue.pop(batchSize)
 }
 
 func (u *uploader) pending() int {
 	u.mu.Lock()
 	defer u.mu.Unlock()
-	return len(u.queue)
+	return u.queue.size
 }
 
 func (u *uploader) dropRemaining() {
 	u.mu.Lock()
-	u.dropped += len(u.queue)
-	u.failed = u.failed || len(u.queue) > 0
-	u.queue = nil
+	dropped := u.queue.clear()
+	u.dropped += dropped
+	u.failed = u.failed || dropped > 0
 	u.mu.Unlock()
 }
 
@@ -240,6 +298,10 @@ func (u *uploader) postWithRetry(ctx context.Context, records []model.Observatio
 	backoff := initialBackoff
 	for {
 		result, err := u.post(ctx, payload)
+		if err == nil && result.accepted >= 0 && (result.batchID != batchID || result.accepted != len(records)) {
+			result.retry = true
+			err = errors.New("collector acknowledgement does not match batch")
+		}
 		if err == nil {
 			accepted := result.accepted
 			if accepted < 0 {
@@ -312,11 +374,11 @@ func (u *uploader) post(ctx context.Context, payload []byte) (postResult, error)
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusAccepted {
-		accepted, err := parseAccepted(response.Body)
+		batchID, accepted, err := parseAccepted(response.Body)
 		if err != nil {
 			return postResult{retry: true}, fmt.Errorf("decode collector acknowledgement: %w", err)
 		}
-		return postResult{accepted: accepted}, nil
+		return postResult{batchID: batchID, accepted: accepted}, nil
 	}
 	if response.StatusCode == http.StatusConflict {
 		_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))

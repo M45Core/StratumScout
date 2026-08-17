@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"log"
+	"math"
 	"math/big"
 	"net"
 	"net/netip"
@@ -52,7 +53,7 @@ type event struct {
 	poolID, prevHash         string
 	connectionID             string
 	at                       time.Time
-	hasTransactions, tls     bool
+	hasTransactions          bool
 	verified                 bool
 	coinbaseAnalyzed         bool
 	blockHeight              uint64
@@ -64,7 +65,6 @@ type event struct {
 	coinbaseOutputsTruncated bool
 	coinbaseOmittedSats      uint64
 	estimatedPoolFeePct      *float64
-	connected                *bool
 	protocol                 *model.Observation
 }
 
@@ -80,14 +80,15 @@ type activeBlock struct {
 	eligible map[string]endpointTarget
 	arrivals map[string]time.Time
 	empty    map[string]bool
-	tls      map[string]bool
 	invalid  map[string]bool
 	payout   map[string]event
 }
 
 // Collect connects to every configured endpoint and emits block and protocol
-// observations. It submits no shares and never stores randomized credentials.
-func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func([]model.Observation) error) error {
+// observations. A non-zero second callback argument is the start of the next
+// reporting cohort after every overlapping block window has closed. It submits
+// no shares and never stores randomized credentials.
+func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func([]model.Observation, time.Time) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	refreshAge, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
@@ -116,15 +117,21 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 	blocks := map[string]*activeBlock{}
 	completedBlocks := map[string]bool{}
 	completedBlockOrder := make([]string, 0, completedBlockLimit)
+	cohortHasCompletedBlock := false
 	refreshEligibleAt := time.Now().Add(refreshAge)
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
-	finish := func(r *activeBlock) error {
-		observations := blockObservations(r, vantage)
-		if len(observations) == 0 {
-			return nil
+	handleEvent := func(e event) error {
+		if e.protocol != nil {
+			record := *e.protocol
+			record.Vantage = vantage
+			return emit([]model.Observation{record}, time.Time{})
 		}
-		return emit(observations)
+		r := activeBlockForEvent(blocks, completedBlocks, configured, e)
+		if r != nil {
+			recordBlockEvent(r, e)
+		}
+		return nil
 	}
 	for {
 		select {
@@ -134,33 +141,47 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 			if !ok {
 				return nil
 			}
-			if e.protocol != nil {
-				record := *e.protocol
-				record.Vantage = vantage
-				if err := emit([]model.Observation{record}); err != nil {
-					return err
-				}
-				continue
+			if err := handleEvent(e); err != nil {
+				return err
 			}
-			if e.connected != nil {
-				continue
-			}
-			r := activeBlockForEvent(blocks, completedBlocks, configured, e)
-			if r == nil {
-				continue
-			}
-			recordBlockEvent(r, e)
 		case now := <-ticker.C:
 			completedBlock := false
 			for id, r := range blocks {
 				if now.Sub(r.started) >= blockWindow {
-					if err := finish(r); err != nil {
-						return err
+					observations := blockObservations(r, vantage)
+					if len(observations) > 0 {
+						if err := emit(observations, time.Time{}); err != nil {
+							return err
+						}
+						cohortHasCompletedBlock = true
 					}
 					completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, id)
 					delete(blocks, id)
 					completedBlock = true
 				}
+			}
+			// Drain events already timestamped at this boundary. A newly arrived
+			// block keeps the current cohort open; protocol records remain in the
+			// cohort whose interval actually contains their wire completion time.
+			drained := false
+			for !drained {
+				select {
+				case e, ok := <-events:
+					if !ok {
+						return nil
+					}
+					if err := handleEvent(e); err != nil {
+						return err
+					}
+				default:
+					drained = true
+				}
+			}
+			if shouldCompleteCohort(cohortHasCompletedBlock, len(blocks)) {
+				if err := emit(nil, now.UTC()); err != nil {
+					return err
+				}
+				cohortHasCompletedBlock = false
 			}
 			if shouldRefreshConnections(now, refreshEligibleAt, completedBlock, len(blocks)) {
 				return ErrConnectionRefresh
@@ -171,6 +192,10 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 
 func shouldRefreshConnections(now, eligibleAt time.Time, completedBlock bool, activeBlocks int) bool {
 	return completedBlock && !now.Before(eligibleAt) && activeBlocks == 0
+}
+
+func shouldCompleteCohort(hasCompletedBlock bool, activeBlocks int) bool {
+	return hasCompletedBlock && activeBlocks == 0
 }
 
 // rememberCompletedBlock bounds process-lifetime deduplication state. The
@@ -245,7 +270,7 @@ func activeBlockForEvent(blocks map[string]*activeBlock, completed map[string]bo
 	if !e.verified || len(blocks) >= activeBlockLimit {
 		return nil
 	}
-	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}, empty: map[string]bool{}, tls: map[string]bool{}, invalid: map[string]bool{}, payout: map[string]event{}}
+	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}, empty: map[string]bool{}, invalid: map[string]bool{}, payout: map[string]event{}}
 	for id, target := range configured {
 		block.eligible[id] = target
 	}
@@ -279,7 +304,9 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 	if endpoint.TLS {
 		tlsConn := tls.Client(rawConn, &tls.Config{ServerName: endpoint.Host, MinVersion: tls.VersionTLS12})
 		tlsStarted := time.Now()
-		err := tlsConn.HandshakeContext(ctx)
+		handshakeCtx, cancelHandshake := context.WithTimeout(ctx, requestTimeout)
+		err := tlsConn.HandshakeContext(handshakeCtx)
+		cancelHandshake()
 		tlsFinished := time.Now()
 		if err != nil {
 			_ = publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolTLSHandshake, tlsStarted, tlsFinished, protocolErrorStatus(err), tlsErrorCategory(err))
@@ -290,16 +317,6 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		}
 		conn = tlsConn
 	}
-
-	closeOnCancelDone := make(chan struct{})
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = conn.Close()
-		case <-closeOnCancelDone:
-		}
-	}()
-	defer close(closeOnCancelDone)
 
 	r := bufio.NewReader(conn)
 	w := bufio.NewWriter(conn)
@@ -355,21 +372,7 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		return err
 	}
 
-	online := true
 	connectionID := endpointConnectionID(poolID, address, endpoint.TLS)
-	select {
-	case out <- event{poolID: poolID, connectionID: connectionID, connected: &online}:
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-	defer func() {
-		offline := false
-		select {
-		case out <- event{poolID: poolID, connectionID: connectionID, connected: &offline}:
-		case <-ctx.Done():
-		}
-	}()
-
 	var window notifyWindow
 	pingID := 2
 	pingPending := false
@@ -479,14 +482,8 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 			continue
 		}
 		clean, _ := msg.Params[8].(bool)
-		branches, _ := msg.Params[4].([]any)
-		branchStrings := make([]string, 0, len(branches))
-		for _, branch := range branches {
-			if value, ok := branch.(string); ok {
-				branchStrings = append(branchStrings, value)
-			}
-		}
-		if !window.accept(prev, clean, len(branches) > 0) {
+		branchStrings := parseMerkleBranches(msg.Params[4])
+		if !window.accept(prev, clean, len(branchStrings) > 0) {
 			continue
 		}
 		job := Job{PrevHash: prev, MerkleBranches: branchStrings, ExtraNonce1: extraNonce1, ExtraNonce2Size: extraNonce2Size, WorkerScript: identity.PayoutScript}
@@ -496,13 +493,27 @@ func watchSession(ctx context.Context, poolID string, endpoint model.Endpoint, o
 		job.Bits, _ = msg.Params[6].(string)
 		job.NTime, _ = msg.Params[7].(string)
 		verification := VerifyJob(job)
-		e := event{poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS), prevHash: prev, at: receivedAt, hasTransactions: len(branches) > 0, tls: endpoint.TLS, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
+		e := event{poolID: poolID, connectionID: connectionID, prevHash: prev, at: receivedAt, hasTransactions: len(branchStrings) > 0, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
 		select {
 		case out <- e:
 		case <-ctx.Done():
 			return ctx.Err()
 		}
 	}
+}
+
+func parseMerkleBranches(value any) []string {
+	branches, ok := value.([]any)
+	if !ok {
+		// Preserve one invalid entry so VerifyJob rejects a malformed branch
+		// container instead of treating it as a valid empty branch list.
+		return []string{""}
+	}
+	parsed := make([]string, len(branches))
+	for index, branch := range branches {
+		parsed[index], _ = branch.(string)
+	}
+	return parsed
 }
 
 type notifyWindow struct {
@@ -553,7 +564,7 @@ func recordBlockEvent(block *activeBlock, e event) {
 		return
 	}
 	if old, exists := block.arrivals[id]; !exists || e.at.Before(old) {
-		block.arrivals[id], block.tls[id] = e.at, e.tls
+		block.arrivals[id] = e.at
 		block.payout[id] = e
 	}
 }
@@ -683,9 +694,19 @@ func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio
 }
 
 func readStratumMessage(reader *bufio.Reader) ([]byte, error) {
-	var message []byte
+	fragment, err := reader.ReadSlice('\n')
+	if len(fragment) > maxStratumMessageSize {
+		return nil, errStratumMessageTooLarge
+	}
+	if err == nil {
+		return fragment, nil
+	}
+	if !errors.Is(err, bufio.ErrBufferFull) {
+		return nil, err
+	}
+	message := append([]byte(nil), fragment...)
 	for {
-		fragment, err := reader.ReadSlice('\n')
+		fragment, err = reader.ReadSlice('\n')
 		if len(message)+len(fragment) > maxStratumMessageSize {
 			return nil, errStratumMessageTooLarge
 		}
@@ -738,9 +759,15 @@ func isPublicEndpointAddress(address netip.Addr) bool {
 func responseID(value any) int {
 	switch v := value.(type) {
 	case float64:
+		if v < 0 || math.Trunc(v) != v || v >= float64(^uint(0)>>1) {
+			return -1
+		}
 		return int(v)
 	case string:
-		id, _ := strconv.Atoi(v)
+		id, err := strconv.Atoi(v)
+		if err != nil || id < 0 {
+			return -1
+		}
 		return id
 	default:
 		return -1

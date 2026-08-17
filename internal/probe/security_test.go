@@ -2,6 +2,7 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"errors"
 	"net/netip"
 	"strings"
@@ -31,6 +32,21 @@ func TestPublicEndpointAddressFilter(t *testing.T) {
 		address := netip.MustParseAddr(raw)
 		if got := isPublicEndpointAddress(address); got != want {
 			t.Errorf("isPublicEndpointAddress(%s) = %t, want %t", raw, got, want)
+		}
+	}
+}
+
+func BenchmarkReadStratumMessage(b *testing.B) {
+	message := []byte(`{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000"]}` + "\n")
+	var source bytes.Reader
+	reader := bufio.NewReaderSize(&source, 4096)
+	b.ReportAllocs()
+	for b.Loop() {
+		source.Reset(message)
+		reader.Reset(&source)
+		line, err := readStratumMessage(reader)
+		if err != nil || len(line) != len(message) {
+			b.Fatalf("read %d bytes: %v", len(line), err)
 		}
 	}
 }

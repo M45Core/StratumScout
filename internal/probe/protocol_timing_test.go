@@ -154,6 +154,21 @@ func TestRequestWireStyles(t *testing.T) {
 	}
 }
 
+func TestResponseIDRejectsMalformedValues(t *testing.T) {
+	for value, want := range map[any]int{
+		float64(3):   3,
+		"4":          4,
+		float64(1.5): -1,
+		float64(-1):  -1,
+		"invalid":    -1,
+		"-2":         -1,
+	} {
+		if got := responseID(value); got != want {
+			t.Errorf("responseID(%v)=%d, want %d", value, got, want)
+		}
+	}
+}
+
 func TestRandomizedDurationBounds(t *testing.T) {
 	minimum, jitter := 15*time.Second, 30*time.Second
 	for range 100 {
@@ -196,6 +211,51 @@ func TestWatchSessionReportsInvalidTLSCertificate(t *testing.T) {
 	if tlsRecord.ResponseStatus != model.ProtocolStatusError || tlsRecord.ErrorCategory != model.ProtocolErrorTLSCertificateInvalid {
 		t.Fatalf("TLS failure record=%+v", *tlsRecord)
 	}
+}
+
+func TestWatchSessionBoundsTLSHandshake(t *testing.T) {
+	allowLocalEndpointDial(t)
+	originalTimeout := requestTimeout
+	requestTimeout = 50 * time.Millisecond
+	t.Cleanup(func() { requestTimeout = originalTimeout })
+
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	serverDone := make(chan struct{})
+	go func() {
+		defer close(serverDone)
+		connection, err := listener.Accept()
+		if err != nil {
+			return
+		}
+		defer connection.Close()
+		_, _ = io.Copy(io.Discard, connection)
+	}()
+
+	address := listener.Addr().(*net.TCPAddr)
+	out := make(chan event, 4)
+	started := time.Now()
+	err = watchSession(context.Background(), "test-pool", model.Endpoint{Host: "127.0.0.1", Port: address.Port, TLS: true}, out)
+	if err == nil {
+		t.Fatal("stalled TLS handshake unexpectedly succeeded")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("TLS timeout took %s", elapsed)
+	}
+	<-serverDone
+	close(out)
+	for event := range out {
+		if event.protocol != nil && event.protocol.ProtocolMethod == model.ProtocolTLSHandshake {
+			if event.protocol.ResponseStatus != model.ProtocolStatusTimeout {
+				t.Fatalf("TLS timeout record=%+v", *event.protocol)
+			}
+			return
+		}
+	}
+	t.Fatal("missing TLS timeout observation")
 }
 
 func TestPublishProtocolUsesWireCompletionTime(t *testing.T) {

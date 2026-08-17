@@ -13,7 +13,6 @@ func TestFirstValidCoinbaseOnlyTemplateCountsAsArrival(t *testing.T) {
 	block := &activeBlock{
 		arrivals: map[string]time.Time{},
 		empty:    map[string]bool{},
-		tls:      map[string]bool{},
 		invalid:  map[string]bool{},
 		payout:   map[string]event{},
 	}
@@ -34,7 +33,6 @@ func TestInvalidTemplateDoesNotBecomeArrival(t *testing.T) {
 	block := &activeBlock{
 		arrivals: map[string]time.Time{},
 		empty:    map[string]bool{},
-		tls:      map[string]bool{},
 		invalid:  map[string]bool{},
 		payout:   map[string]event{},
 	}
@@ -136,6 +134,18 @@ func TestConnectionRefreshUsesNextCompletedBlockAfterMaximumAge(t *testing.T) {
 	}
 	if !shouldRefreshConnections(eligible, eligible, true, 0) {
 		t.Fatal("connections did not refresh at the first safe block boundary")
+	}
+}
+
+func TestOverlappingBlockWindowsShareACohort(t *testing.T) {
+	if shouldCompleteCohort(true, 1) {
+		t.Fatal("cohort completed while an overlapping block window was active")
+	}
+	if !shouldCompleteCohort(true, 0) {
+		t.Fatal("cohort did not complete after its final block window closed")
+	}
+	if shouldCompleteCohort(false, 0) {
+		t.Fatal("cohort completed without an emitted block")
 	}
 }
 

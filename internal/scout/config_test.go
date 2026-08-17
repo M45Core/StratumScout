@@ -137,6 +137,22 @@ func TestFetchProbeConfig(t *testing.T) {
 	}
 }
 
+func TestFetchProbeConfigRejectsEmptyFilteredVantage(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/api/v1/probe-config" {
+			t.Fatalf("path=%q", request.URL.Path)
+		}
+		sum := sha256.Sum256([]byte("config"))
+		fmt.Fprintf(response, `{"schema_version":1,"config_revision":"sha256:%s","pools":[{"id":"pool","endpoints":[{"host":"eu.example","port":3333,"tls":false,"continent":"europe"}]}]}`, hex.EncodeToString(sum[:]))
+	}))
+	defer server.Close()
+	collectorURL, _ := url.Parse(server.URL)
+	cfg := Config{CollectorURL: collectorURL, Vantage: "japan", FilterContinents: true, Client: server.Client()}
+	if _, _, err := fetchProbeConfig(context.Background(), cfg); err == nil {
+		t.Fatal("configuration with no selected endpoints was accepted")
+	}
+}
+
 func TestProbeConfigRejectsInvalidContinent(t *testing.T) {
 	sum := sha256.Sum256([]byte("config"))
 	config := ProbeConfig{

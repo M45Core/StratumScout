@@ -56,7 +56,7 @@ func TestUploaderSignsCompressedEnvelopeAndRetriesServerFailure(t *testing.T) {
 			t.Fatalf("envelope=%+v", got)
 		}
 		response.WriteHeader(http.StatusAccepted)
-		fmt.Fprint(response, `{"accepted":1}`)
+		fmt.Fprintf(response, `{"batch_id":%q,"accepted":1}`, got.BatchID)
 	}))
 	defer server.Close()
 	collectorURL, _ := url.Parse(server.URL)
@@ -150,6 +150,63 @@ func TestUploaderTreatsDuplicateBatchAsDelivered(t *testing.T) {
 	}
 }
 
+func TestUploaderRetriesMismatchedAcknowledgement(t *testing.T) {
+	var attempts atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(response http.ResponseWriter, request *http.Request) {
+		if attempts.Add(1) == 1 {
+			response.WriteHeader(http.StatusAccepted)
+			fmt.Fprint(response, `{"batch_id":"wrong-batch","accepted":1}`)
+			return
+		}
+		http.Error(response, "duplicate batch", http.StatusConflict)
+	}))
+	defer server.Close()
+	collectorURL, _ := url.Parse(server.URL)
+	cfg := Config{CollectorURL: collectorURL, KeyID: "current", Secret: []byte(strings.Repeat("k", 32)), Region: "lax", Vantage: "us-west", MachineID: "test", Client: server.Client()}
+	started := time.Now().UTC()
+	u := newUploader(context.Background(), cfg, "run-test", started, "sha256:"+strings.Repeat("a", 64))
+	if err := u.enqueue([]model.Observation{{Version: model.ObservationVersion, ObservedAt: started}, {Version: model.ObservationVersion, ObservedAt: started}}); err != nil {
+		t.Fatal(err)
+	}
+	stats := u.closeAndFlush()
+	if attempts.Load() != 2 || stats.Uploaded != 2 || stats.Dropped != 0 || stats.Failed {
+		t.Fatalf("attempts=%d stats=%+v", attempts.Load(), stats)
+	}
+}
+
+func TestParseAcceptedRequiresOneCompleteAcknowledgement(t *testing.T) {
+	batchID, accepted, err := parseAccepted(strings.NewReader(`{"batch_id":"run-batch-1","accepted":2}`))
+	if err != nil || batchID != "run-batch-1" || accepted != 2 {
+		t.Fatalf("batch=%q accepted=%d err=%v", batchID, accepted, err)
+	}
+	for _, body := range []string{
+		`{"accepted":2}`,
+		`{"batch_id":"run-batch-1","accepted":0}`,
+		`{"batch_id":"run-batch-1","accepted":2}{}`,
+	} {
+		if _, _, err := parseAccepted(strings.NewReader(body)); err == nil {
+			t.Fatalf("invalid acknowledgement accepted: %s", body)
+		}
+	}
+}
+
+func TestObservationQueueDropsOldestInConstantSpace(t *testing.T) {
+	var queue observationQueue
+	for index := 0; index < queueLimit+3; index++ {
+		dropped := queue.push(model.Observation{PoolID: strconv.Itoa(index)})
+		if dropped != (index >= queueLimit) {
+			t.Fatalf("push %d dropped=%t", index, dropped)
+		}
+	}
+	var records []model.Observation
+	for queue.size > 0 {
+		records = append(records, queue.pop(batchSize)...)
+	}
+	if len(records) != queueLimit || records[0].PoolID != "3" || records[len(records)-1].PoolID != strconv.Itoa(queueLimit+2) {
+		t.Fatalf("retained %d records from %q through %q", len(records), records[0].PoolID, records[len(records)-1].PoolID)
+	}
+}
+
 func BenchmarkEncodeEnvelope(b *testing.B) {
 	started := time.Date(2026, time.August, 15, 12, 0, 0, 0, time.UTC)
 	observations := make([]model.Observation, batchSize)
@@ -172,5 +229,14 @@ func BenchmarkEncodeEnvelope(b *testing.B) {
 		if _, err := encodeEnvelope(value); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func BenchmarkObservationQueueAtCapacity(b *testing.B) {
+	queue := observationQueue{entries: make([]model.Observation, queueLimit), size: queueLimit}
+	record := model.Observation{PoolID: "pool", Endpoint: "pool.example:3333"}
+	b.ReportAllocs()
+	for b.Loop() {
+		queue.push(record)
 	}
 }

@@ -27,6 +27,11 @@ By default, the process stays connected continuously. Each reporting cohort:
 6. rotates only the reporting run ID while the process and pool connections
    remain active for the next block.
 
+If Bitcoin blocks arrive less than 30 seconds apart, their overlapping windows
+remain in the same reporting cohort. Scout publishes the terminal record once
+all overlapping windows close, so every observation stays inside its signed run
+interval.
+
 Pool sessions are periodically refreshed for setup telemetry. Each process
 chooses a connection age from 1 hour 45 minutes through 2 hours 15 minutes,
 then waits for the next completed 30-second block window, publishes that block,

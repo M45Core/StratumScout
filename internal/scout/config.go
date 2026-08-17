@@ -172,6 +172,9 @@ func fetchProbeConfig(ctx context.Context, cfg Config) (ProbeConfig, []model.Poo
 			pools = append(pools, converted)
 		}
 	}
+	if len(pools) == 0 {
+		return ProbeConfig{}, nil, errors.New("probe configuration has no endpoints for this vantage")
+	}
 	return remote, pools, nil
 }
 
@@ -288,17 +291,30 @@ func endpointCount(pools []model.Pool) int {
 	return total
 }
 
-func parseAccepted(body io.Reader) (int, error) {
+func parseAccepted(body io.Reader) (string, int, error) {
 	var response struct {
-		Accepted int `json:"accepted"`
+		BatchID  string `json:"batch_id"`
+		Accepted int    `json:"accepted"`
 	}
-	if err := json.NewDecoder(io.LimitReader(body, 64<<10)).Decode(&response); err != nil {
-		return 0, err
+	limited := &io.LimitedReader{R: body, N: 64<<10 + 1}
+	decoder := json.NewDecoder(limited)
+	if err := decoder.Decode(&response); err != nil {
+		return "", 0, err
 	}
-	if response.Accepted < 1 {
-		return 0, errors.New("collector accepted no observations")
+	var extra any
+	if err := decoder.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return "", 0, errors.New("collector acknowledgement has trailing JSON")
+		}
+		return "", 0, err
 	}
-	return response.Accepted, nil
+	if limited.N == 0 {
+		return "", 0, errors.New("collector acknowledgement is too large")
+	}
+	if response.BatchID == "" || response.Accepted < 1 {
+		return "", 0, errors.New("invalid collector acknowledgement")
+	}
+	return response.BatchID, response.Accepted, nil
 }
 
 func sequenceID(runID string, sequence uint64) string {
