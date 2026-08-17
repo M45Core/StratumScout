@@ -8,55 +8,51 @@ uploads authenticated results after each block.
 The probe is stateless. It cannot submit mining shares and has no listener,
 database, volume, or durable local state.
 
-Long-lived state is explicitly bounded. Upload buffering is capped at 2,000
-observations, no more than 32 active block windows are retained for 30 seconds,
-configured endpoint and session maps cannot exceed the validated endpoint list,
-and completed-block deduplication retains only the latest 256 block IDs.
+Long-lived state is explicitly bounded. Scout retains at most one pending setup
+result per operation and endpoint, no more than 32 active block windows for 30
+seconds, endpoint and session maps no larger than the validated configuration,
+and only the latest 256 completed block IDs. It has no timed upload buffer.
 
 ## Operating modes
 
-By default, the process stays connected continuously. Each reporting cohort:
+By default, the process stays connected continuously. For each Bitcoin block it:
 
-1. fetches the current collector configuration and establishes pool connections
-   once at process startup;
-2. assigns a random identifier to the current reporting cohort;
-3. observes until a block transition is detected and decodes its BIP34 coinbase
-   height when present;
-4. keeps the block window open for 30 seconds from the first observation;
-5. flushes block observations and publishes one terminal run record; and
-6. rotates only the reporting run ID while the process and pool connections
-   remain active for the next block.
+1. establishes the configured pool connections;
+2. timestamps the first clean previous-block-hash transition from each endpoint
+   as soon as the message's first byte is readable;
+3. keeps the block window open for 30 seconds from the first observation;
+4. places those timestamps and any pending setup timings into one nested block
+   sample; and
+5. makes one authenticated collector request for that sample.
 
 If Bitcoin blocks arrive less than 30 seconds apart, their overlapping windows
-remain in the same reporting cohort. Scout publishes the terminal record once
-all overlapping windows close, so every observation stays inside its signed run
-interval.
+remain independent and each produces exactly one block upload when its window
+closes. A block sample is never split, queued, or retried. If the collector is
+unavailable, that block is dropped and the Stratum sessions continue unchanged.
 
-Pool sessions are periodically refreshed for setup telemetry. Each process
-chooses a connection age from 1 hour 45 minutes through 2 hours 15 minutes,
-then waits for the next completed 30-second block window, publishes that block,
-and immediately reconnects. The Scout process and current reporting cohort
-remain alive across this planned refresh. The jitter avoids synchronized probe
-reconnections while retaining roughly a dozen connect, TLS, subscribe, and
-authorize samples per endpoint per day and placing the brief connection gap
-immediately after a measured block.
+Connect, TLS, subscribe, and authorize timings are held only until the next
+block. Sessions reconnect only after an actual disconnect; Scout does not tear
+down healthy sessions to manufacture setup samples. If no reconnect operation
+occurred, the corresponding JSON field is omitted rather than populated with
+stale data. Multiple attempts before one block collapse to the latest connection
+path. Scout does not send Stratum ping requests, and an idle authorized session
+remains blocked on its network read. Collector configuration is fetched once at
+process startup and changes take effect when Scout restarts.
 
-This boundary is required by StratumStats: remote block observations affect
-scores only after the matching terminal record proves that the cohort uploaded
-without loss. An unexpected collector failure restarts the long-lived run with
-exponential backoff capped at one minute. `SIGINT` and `SIGTERM` stop the
-process.
+Each accepted request is the completion proof for its entire block sample; no
+separate protocol or terminal records are uploaded. An unexpected observation
+loop failure restarts the long-lived process. Repeated endpoint failures back
+off to 15 minutes and reset only after a session remains stable for 10 minutes.
+`SIGINT` and `SIGTERM` stop the process.
 
-Each uploaded block observation carries the decoded Bitcoin height when the
-coinbase input contains a valid BIP34 height. StratumStats uses that value for
-the selected region's block-height indicator; Scout does not query a separate
-Bitcoin node for chain-tip state.
-
-Scout timestamps each complete Stratum message immediately after the wire read,
-before JSON parsing, coinbase reconstruction, or merkle verification. Validation
-still decides whether a block-template arrival is accepted. Protocol response
-timings use the same wire-completion boundary so parsing work is not attributed
-to the pool.
+Scout timestamps each Stratum message as soon as its first byte is readable,
+before waiting for the remaining bytes and before JSON parsing. For
+`mining.notify`, it extracts only the previous-block hash and `clean_jobs` flag;
+coinbase, merkle, version, difficulty, time, and extranonce fields are neither
+decoded nor uploaded. Same-hash job updates are ignored regardless of
+transaction changes. StratumStats calculates relative arrival offsets after
+authenticated ingest. Protocol response timings use the same first-byte
+boundary so message length and parsing work are not attributed to the pool.
 
 ## Configuration
 
@@ -66,9 +62,8 @@ to the pool.
 | `INGEST_KEY_ID` | yes | — | Identifier for authenticated ingestion |
 | `INGEST_SECRET` | yes | — | Ingest secret of at least 32 bytes |
 | `FLY_REGION` | yes | — | Maps the Machine region to a reporting vantage |
-| `FLY_MACHINE_ID` | yes | — | Binds authenticated envelopes to the Machine |
 | `RUN_FOR` | no | `5m` | One-shot window when `CONTINUOUS=false`; ignored in continuous mode |
-| `CONTINUOUS` | no | `true` | Stay active and publish a completed cohort after each block |
+| `CONTINUOUS` | no | `true` | Stay active and publish one sample after each block |
 | `PROCESS_NICE` | no | `0` | Linux scheduler niceness from 0 through 19 |
 | `FILTER_CONTINENTS` | no | `false` | Skip endpoints explicitly assigned to another continent |
 
@@ -86,7 +81,7 @@ non-zero value is rejected on non-Linux platforms.
 Set `CONTINUOUS=false` only for a bounded one-shot diagnostic process. In the
 production mode, `RUN_FOR` does not impose a periodic cutoff: Scout remains
 connected until a block, reports approximately 30 seconds after the first
-observation, and begins the next reporting cohort without reconnecting.
+observation, and continues waiting on the same sessions without reconnecting.
 
 Never place ingest credentials in an image, `fly.toml`, ordinary Machine
 environment, logs, or command-line arguments. Load them as Fly app secrets.

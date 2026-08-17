@@ -16,12 +16,11 @@ import (
 
 func validEnvironment() map[string]string {
 	return map[string]string{
-		"COLLECTOR_URL":  "https://stats.example.com/path",
-		"INGEST_KEY_ID":  "regional-test",
-		"INGEST_SECRET":  strings.Repeat("s", 32),
-		"FLY_REGION":     "lax",
-		"FLY_MACHINE_ID": "machine-test",
-		"RUN_FOR":        "30s",
+		"COLLECTOR_URL": "https://stats.example.com/path",
+		"INGEST_KEY_ID": "regional-test",
+		"INGEST_SECRET": strings.Repeat("s", 32),
+		"FLY_REGION":    "lax",
+		"RUN_FOR":       "30s",
 	}
 }
 
@@ -90,15 +89,10 @@ func TestLoadConfig(t *testing.T) {
 }
 
 func TestLoadConfigRejectsUnsafeIdentifiers(t *testing.T) {
-	for key, value := range map[string]string{
-		"INGEST_KEY_ID":  "key\ninjection",
-		"FLY_MACHINE_ID": "machine\ninjection",
-	} {
-		environment := validEnvironment()
-		environment[key] = value
-		if _, err := LoadConfig(func(name string) string { return environment[name] }); err == nil {
-			t.Fatalf("unsafe %s accepted", key)
-		}
+	environment := validEnvironment()
+	environment["INGEST_KEY_ID"] = "key\ninjection"
+	if _, err := LoadConfig(func(name string) string { return environment[name] }); err == nil {
+		t.Fatal("unsafe ingest key ID accepted")
 	}
 }
 

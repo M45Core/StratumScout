@@ -8,43 +8,33 @@ import (
 	"github.com/M45Core/StratumScout/internal/model"
 )
 
-func TestFirstValidCoinbaseOnlyTemplateCountsAsArrival(t *testing.T) {
+func TestFirstCandidateCountsAsArrival(t *testing.T) {
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{
+		id:       "block",
 		arrivals: map[string]time.Time{},
-		empty:    map[string]bool{},
-		invalid:  map[string]bool{},
-		payout:   map[string]event{},
 	}
 
-	recordBlockEvent(block, event{poolID: "pool", at: started, verified: true})
-	recordBlockEvent(block, event{poolID: "pool", at: started.Add(2 * time.Second), verified: true, hasTransactions: true})
+	recordBlockEvent(block, event{poolID: "pool", prevHash: "block", at: started})
+	recordBlockEvent(block, event{poolID: "pool", prevHash: "block", at: started.Add(2 * time.Second)})
 
 	if got := block.arrivals["pool"]; !got.Equal(started) {
-		t.Fatalf("arrival = %v, want first valid template at %v", got, started)
-	}
-	if !block.empty["pool"] {
-		t.Fatal("coinbase-only first template was not retained as raw evidence")
+		t.Fatalf("arrival = %v, want first candidate at %v", got, started)
 	}
 }
 
-func TestInvalidTemplateDoesNotBecomeArrival(t *testing.T) {
+func TestEventWithoutBlockHashDoesNotBecomeArrival(t *testing.T) {
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{
+		id:       "block",
 		arrivals: map[string]time.Time{},
-		empty:    map[string]bool{},
-		invalid:  map[string]bool{},
-		payout:   map[string]event{},
 	}
 
-	recordBlockEvent(block, event{poolID: "pool", at: started, hasTransactions: true})
-	recordBlockEvent(block, event{poolID: "pool", at: started.Add(time.Second), verified: true, hasTransactions: true})
+	recordBlockEvent(block, event{poolID: "pool", at: started})
+	recordBlockEvent(block, event{poolID: "pool", prevHash: "block", at: started.Add(time.Second)})
 
 	if got := block.arrivals["pool"]; !got.Equal(started.Add(time.Second)) {
-		t.Fatalf("arrival = %v, want first valid template", got)
-	}
-	if !block.invalid["pool"] {
-		t.Fatal("invalid template evidence was not retained")
+		t.Fatalf("arrival = %v, want first candidate with a job", got)
 	}
 }
 
@@ -58,37 +48,60 @@ func TestBufferedArrivalIsDrainedBeforeBlockFinalization(t *testing.T) {
 			"second": {poolID: "second", address: "second.example:3333"},
 		},
 		arrivals: map[string]time.Time{"first": started},
-		empty:    map[string]bool{},
-		invalid:  map[string]bool{},
-		payout:   map[string]event{},
 	}
 	events := make(chan event, 1)
-	events <- event{connectionID: "second", at: started.Add(blockWindow), verified: true}
+	events <- event{connectionID: "second", prevHash: "block", at: started.Add(blockWindow)}
 
-	closed, err := drainBufferedEvents(events, func(e event) error {
+	closed := drainBufferedEvents(events, func(e event) {
 		recordBlockEvent(block, e)
-		return nil
 	})
-	if err != nil || closed {
-		t.Fatalf("drain closed=%t err=%v", closed, err)
+	if closed {
+		t.Fatal("drain reported a closed event channel")
 	}
-	if observations := blockObservations(block, "us-west"); len(observations) != 2 || !observations[1].Arrived {
-		t.Fatalf("buffered arrival was omitted: %+v", observations)
+	sample, ok := blockSample(block, nil)
+	if !ok || len(sample.EndpointSamples) != 2 || sample.EndpointSamples[1].ReceivedAt == nil {
+		t.Fatalf("buffered arrival was omitted: %+v", sample)
+	}
+}
+
+func TestBlockSampleAcceptsSingleArrival(t *testing.T) {
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	sample, ok := blockSample(&activeBlock{
+		id: "block",
+		eligible: map[string]endpointTarget{
+			"only": {poolID: "pool", address: "pool.example:3333"},
+		},
+		arrivals: map[string]time.Time{"only": started},
+	}, nil)
+	if !ok || len(sample.EndpointSamples) != 1 || sample.EndpointSamples[0].ReceivedAt == nil {
+		t.Fatalf("single-arrival sample=%+v ok=%t", sample, ok)
+	}
+}
+
+func TestNextBlockDeadlineSleepsUntilEarliestOpenWindow(t *testing.T) {
+	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
+	deadline, ok := nextBlockDeadline(map[string]*activeBlock{
+		"later":   {started: started.Add(2 * time.Second)},
+		"earlier": {started: started},
+	})
+	if !ok || !deadline.Equal(started.Add(blockWindow)) {
+		t.Fatalf("deadline=%v ok=%t", deadline, ok)
+	}
+	if _, ok := nextBlockDeadline(nil); ok {
+		t.Fatal("empty block set scheduled a wakeup")
 	}
 }
 
 func TestBlockWindowUsesEarliestWireTimeAndRejectsLateJobs(t *testing.T) {
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{
+		id:       "block",
 		started:  started.Add(time.Second),
 		arrivals: map[string]time.Time{},
-		empty:    map[string]bool{},
-		invalid:  map[string]bool{},
-		payout:   map[string]event{},
 	}
-	recordBlockEvent(block, event{connectionID: "earlier", at: started, verified: true})
-	recordBlockEvent(block, event{connectionID: "boundary", at: started.Add(blockWindow), verified: true})
-	recordBlockEvent(block, event{connectionID: "late", at: started.Add(blockWindow + time.Nanosecond), verified: true})
+	recordBlockEvent(block, event{connectionID: "earlier", prevHash: "block", at: started})
+	recordBlockEvent(block, event{connectionID: "boundary", prevHash: "block", at: started.Add(blockWindow)})
+	recordBlockEvent(block, event{connectionID: "late", prevHash: "block", at: started.Add(blockWindow + time.Nanosecond)})
 
 	if !block.started.Equal(started) {
 		t.Fatalf("block started=%v, want earliest wire time %v", block.started, started)
@@ -110,7 +123,7 @@ func TestFinalizedBlockCannotBeReopenedByLateJob(t *testing.T) {
 	}
 	started := time.Date(2026, 8, 1, 12, 0, 0, 0, time.UTC)
 
-	first := activeBlockForEvent(blocks, completed, configured, event{poolID: "first", connectionID: "first", prevHash: "block", at: started, verified: true})
+	first := activeBlockForEvent(blocks, completed, configured, event{poolID: "first", connectionID: "first", prevHash: "block", at: started})
 	if first == nil {
 		t.Fatal("initial block event did not open a window")
 	}
@@ -151,7 +164,7 @@ func TestEveryConfiguredEndpointRemainsEligibleWhileDisconnected(t *testing.T) {
 		"plain": {poolID: "pool", address: "pool.example:3333"},
 		"tls":   {poolID: "pool", address: "pool.example:443", tls: true},
 	}
-	block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{poolID: "other", prevHash: "block", at: time.Now(), verified: true})
+	block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{poolID: "other", prevHash: "block", at: time.Now()})
 	if len(block.eligible) != 2 || block.eligible["plain"].address == "" || !block.eligible["tls"].tls {
 		t.Fatalf("eligible endpoints = %+v, want every configured endpoint", block.eligible)
 	}
@@ -161,60 +174,20 @@ func TestActiveBlockWindowsAreBounded(t *testing.T) {
 	blocks := map[string]*activeBlock{}
 	configured := map[string]endpointTarget{"pool": {poolID: "pool", address: "pool.example:3333"}}
 	for index := 0; index < activeBlockLimit; index++ {
-		event := event{prevHash: strconv.Itoa(index), at: time.Now(), verified: true}
+		event := event{prevHash: strconv.Itoa(index), at: time.Now()}
 		if activeBlockForEvent(blocks, map[string]bool{}, configured, event) == nil {
 			t.Fatalf("valid window %d was rejected before the limit", index)
 		}
 	}
-	if block := activeBlockForEvent(blocks, map[string]bool{}, configured, event{prevHash: "overflow", at: time.Now(), verified: true}); block != nil {
+	if block := activeBlockForEvent(blocks, map[string]bool{}, configured, event{prevHash: "overflow", at: time.Now()}); block != nil {
 		t.Fatal("active block window limit was not enforced")
 	}
-	if block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{prevHash: "invalid", at: time.Now()}); block != nil {
-		t.Fatal("invalid template opened a new block window")
+	if block := activeBlockForEvent(map[string]*activeBlock{}, map[string]bool{}, configured, event{at: time.Now()}); block != nil {
+		t.Fatal("event without a block hash opened a new window")
 	}
 }
 
-func TestConnectionRefreshUsesNextCompletedBlockAfterMaximumAge(t *testing.T) {
-	eligible := time.Date(2026, 8, 12, 2, 0, 0, 0, time.UTC)
-	if shouldRefreshConnections(eligible.Add(-time.Second), eligible, true, 0) {
-		t.Fatal("connections refreshed before reaching maximum age")
-	}
-	if shouldRefreshConnections(eligible, eligible, false, 0) {
-		t.Fatal("connections refreshed without a completed block")
-	}
-	if shouldRefreshConnections(eligible, eligible, true, 1) {
-		t.Fatal("connections refreshed while another block window was active")
-	}
-	if !shouldRefreshConnections(eligible, eligible, true, 0) {
-		t.Fatal("connections did not refresh at the first safe block boundary")
-	}
-}
-
-func TestOverlappingBlockWindowsShareACohort(t *testing.T) {
-	if shouldCompleteCohort(true, 1) {
-		t.Fatal("cohort completed while an overlapping block window was active")
-	}
-	if !shouldCompleteCohort(true, 0) {
-		t.Fatal("cohort did not complete after its final block window closed")
-	}
-	if shouldCompleteCohort(false, 0) {
-		t.Fatal("cohort completed without an emitted block")
-	}
-}
-
-func TestConnectionRefreshAgeIsBounded(t *testing.T) {
-	for range 100 {
-		age, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if age < connectionRefreshMin || age > connectionRefreshMin+connectionRefreshSpan {
-			t.Fatalf("connection refresh age %s outside [%s,%s]", age, connectionRefreshMin, connectionRefreshMin+connectionRefreshSpan)
-		}
-	}
-}
-
-func TestBlockObservationsAreEmittedPerEndpointIncludingMisses(t *testing.T) {
+func TestBlockSampleContainsOnlyEndpointDataActuallyObserved(t *testing.T) {
 	started := time.Date(2026, 8, 10, 12, 0, 0, 0, time.UTC)
 	block := &activeBlock{
 		id:      "block",
@@ -225,23 +198,24 @@ func TestBlockObservationsAreEmittedPerEndpointIncludingMisses(t *testing.T) {
 			"c": {poolID: "other", address: "three.example:3333"},
 		},
 		arrivals: map[string]time.Time{"a": started.Add(50 * time.Millisecond), "c": started.Add(150 * time.Millisecond)},
-		empty:    map[string]bool{},
-		invalid:  map[string]bool{},
-		payout:   map[string]event{},
+	}
+	duration := 12.5
+	pending := map[string]model.EndpointSetup{
+		"b": {Connect: &model.ProtocolSample{ObservedAt: started, DurationMS: duration, ResponseStatus: model.ProtocolStatusOK}},
 	}
 
-	observations := blockObservations(block, "us-west")
-	if len(observations) != 3 {
-		t.Fatalf("observations = %d, want one per configured endpoint", len(observations))
+	sample, ok := blockSample(block, pending)
+	if !ok || sample.BlockID != "block" || len(sample.EndpointSamples) != 3 {
+		t.Fatalf("block sample = %+v", sample)
 	}
-	plain, secure, other := observations[0], observations[1], observations[2]
-	if plain.Version != model.ObservationVersion || plain.PoolID != "pool" || plain.Endpoint != "one.example:3333" || plain.TLS || !plain.Arrived || plain.OffsetMS != 0 {
-		t.Fatalf("plain observation = %+v", plain)
+	plain, secure, other := sample.EndpointSamples[0], sample.EndpointSamples[1], sample.EndpointSamples[2]
+	if plain.PoolID != "pool" || plain.Endpoint != "one.example:3333" || plain.TLS || plain.ReceivedAt == nil || !plain.ReceivedAt.Equal(started.Add(50*time.Millisecond)) {
+		t.Fatalf("plain endpoint sample = %+v", plain)
 	}
-	if secure.PoolID != "pool" || secure.Endpoint != "two.example:443" || !secure.TLS || secure.Arrived || secure.OffsetMS != 0 {
-		t.Fatalf("missed TLS observation = %+v", secure)
+	if secure.PoolID != "pool" || secure.Endpoint != "two.example:443" || !secure.TLS || secure.ReceivedAt != nil || secure.Setup == nil || secure.Setup.Connect == nil {
+		t.Fatalf("setup-only endpoint sample = %+v", secure)
 	}
-	if other.Endpoint != "three.example:3333" || !other.Arrived || other.OffsetMS != 100 {
-		t.Fatalf("other observation = %+v", other)
+	if other.Endpoint != "three.example:3333" || other.ReceivedAt == nil || !other.ReceivedAt.Equal(started.Add(150*time.Millisecond)) {
+		t.Fatalf("other endpoint sample = %+v", other)
 	}
 }

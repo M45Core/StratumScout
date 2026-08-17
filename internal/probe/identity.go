@@ -157,10 +157,9 @@ var rentalWorkerRoots = []string{
 }
 
 type Identity struct {
-	Username     string
-	Agent        string
-	PayoutScript []byte
-	wireStyle    stratumWireStyle
+	Username  string
+	Agent     string
+	wireStyle stratumWireStyle
 }
 
 func RandomIdentity() (Identity, error) {
@@ -180,8 +179,6 @@ func RandomIdentity() (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	payoutScript := append([]byte{0x76, 0xa9, 0x14}, payload[1:]...)
-	payoutScript = append(payoutScript, 0x88, 0xac)
 	username := address
 	if worker != "" {
 		username += "." + worker
@@ -190,7 +187,7 @@ func RandomIdentity() (Identity, error) {
 	if err != nil {
 		return Identity{}, err
 	}
-	return Identity{Username: username, Agent: agent, PayoutScript: payoutScript, wireStyle: stratumWireStyleForAgent(agent)}, nil
+	return Identity{Username: username, Agent: agent, wireStyle: stratumWireStyleForAgent(agent)}, nil
 }
 
 type stratumWireStyle uint8

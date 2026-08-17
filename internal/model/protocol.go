@@ -3,14 +3,14 @@ package model
 const (
 	SourceRemoteScheduled = "fly-scheduled"
 
-	RecordTypeProtocol = "protocol"
-	RecordTypeProbeRun = "probe_run"
+	RecordTypeProtocol    = "protocol"
+	RecordTypeProbeRun    = "probe_run"
+	RecordTypeBlockSample = "block_sample"
 
 	ProtocolConnect      = "tcp.connect"
 	ProtocolTLSHandshake = "tls.handshake"
 	ProtocolSubscribe    = "mining.subscribe"
 	ProtocolAuthorize    = "mining.authorize"
-	ProtocolPing         = "mining.ping"
 
 	ProtocolStatusOK          = "ok"
 	ProtocolStatusRejected    = "rejected"

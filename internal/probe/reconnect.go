@@ -13,8 +13,9 @@ import (
 )
 
 const (
-	reconnectBackoffMin = time.Second
-	reconnectBackoffMax = time.Minute
+	reconnectBackoffMin  = time.Second
+	reconnectBackoffMax  = 15 * time.Minute
+	reconnectStableAfter = 10 * time.Minute
 )
 
 // watch keeps a pool endpoint represented through ordinary transient network
@@ -22,15 +23,16 @@ const (
 func watch(ctx context.Context, poolID string, endpoint model.Endpoint, out chan<- event) error {
 	backoff := reconnectBackoffMin
 	for {
-		established := false
-		err := watchSessionWithReady(ctx, poolID, endpoint, out, func() { established = true })
+		var establishedAt time.Time
+		err := watchSessionWithReady(ctx, poolID, endpoint, out, func() { establishedAt = time.Now() })
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
 		if !shouldRetry(err) {
 			return fmt.Errorf("not retrying after permanent rejection: %w", err)
 		}
-		delay, nextBackoff := advanceReconnectBackoff(backoff, established)
+		stable := !establishedAt.IsZero() && time.Since(establishedAt) >= reconnectStableAfter
+		delay, nextBackoff := advanceReconnectBackoff(backoff, stable)
 		log.Printf("probe pool=%s endpoint=%s disconnected category=%s retry_in=%s", poolID, net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)), connectionErrorCategory(err), delay)
 		timer := time.NewTimer(delay)
 		select {

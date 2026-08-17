@@ -18,13 +18,17 @@ func TestExplicitPoolRejectionIsNotRetried(t *testing.T) {
 	}
 }
 
-func TestReconnectBackoffResetsAfterEstablishedSession(t *testing.T) {
+func TestReconnectBackoffResetsOnlyAfterStableSession(t *testing.T) {
 	delay, next := advanceReconnectBackoff(reconnectBackoffMax, true)
 	if delay != reconnectBackoffMin || next != 2*reconnectBackoffMin {
 		t.Fatalf("reset backoff delay=%s next=%s", delay, next)
 	}
 	delay, next = advanceReconnectBackoff(30*time.Second, false)
-	if delay != 30*time.Second || next != reconnectBackoffMax {
+	if delay != 30*time.Second || next != time.Minute {
 		t.Fatalf("continued backoff delay=%s next=%s", delay, next)
+	}
+	delay, next = advanceReconnectBackoff(reconnectBackoffMax, false)
+	if delay != reconnectBackoffMax || next != reconnectBackoffMax {
+		t.Fatalf("capped backoff delay=%s next=%s", delay, next)
 	}
 }

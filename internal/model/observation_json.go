@@ -2,6 +2,23 @@ package model
 
 import "encoding/json"
 
+// MarshalJSON applies the same worker-destination redaction to nested block
+// samples that Observation.MarshalJSON applies to legacy flat observations.
+func (e CoinbaseEvidence) MarshalJSON() ([]byte, error) {
+	type evidenceAlias CoinbaseEvidence
+	redacted := evidenceAlias(e)
+	if len(e.CoinbaseOutputs) > 0 {
+		redacted.CoinbaseOutputs = make([]CoinbaseOutput, 0, len(e.CoinbaseOutputs))
+		for _, output := range e.CoinbaseOutputs {
+			if output.Worker {
+				continue
+			}
+			redacted.CoinbaseOutputs = append(redacted.CoinbaseOutputs, output)
+		}
+	}
+	return json.Marshal(redacted)
+}
+
 // MarshalJSON provides a final serialization boundary for the private probe
 // payout destination. Older in-memory records may still contain that retained
 // output, but its address and script must never reach JSONL or an API payload.

@@ -6,8 +6,6 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
-
-	"github.com/M45Core/StratumScout/internal/model"
 )
 
 func TestRunContinuouslyStartsFreshRunsUntilCanceled(t *testing.T) {
@@ -24,16 +22,6 @@ func TestRunContinuouslyStartsFreshRunsUntilCanceled(t *testing.T) {
 	}
 	if calls.Load() != 2 {
 		t.Fatalf("runs=%d, want 2", calls.Load())
-	}
-}
-
-func TestHasFinalizedBlock(t *testing.T) {
-	protocol := model.Observation{RecordType: model.RecordTypeProtocol, BlockID: "ignored"}
-	if hasFinalizedBlock([]model.Observation{protocol}) {
-		t.Fatal("protocol record treated as a finalized block")
-	}
-	if !hasFinalizedBlock([]model.Observation{{BlockID: "block-1"}}) {
-		t.Fatal("block observation was not recognized")
 	}
 }
 

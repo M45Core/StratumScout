@@ -18,8 +18,6 @@ import (
 	"github.com/M45Core/StratumScout/internal/model"
 )
 
-const AgentVersion = "0.1.0"
-
 const (
 	maxProbeConfigBytes = 1 << 20
 	maxProbePools       = 128
@@ -32,7 +30,6 @@ type Config struct {
 	Secret           []byte
 	Region           string
 	Vantage          string
-	MachineID        string
 	RunFor           time.Duration
 	Continuous       bool
 	ProcessNice      int
@@ -76,10 +73,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		return Config{}, errors.New("unsupported FLY_REGION")
 	}
 	vantage := productionRegion.Vantage
-	machineID := strings.TrimSpace(getenv("FLY_MACHINE_ID"))
-	if !validID(machineID, 128) {
-		return Config{}, errors.New("FLY_MACHINE_ID is required")
-	}
 	runFor := 5 * time.Minute
 	if raw := strings.TrimSpace(getenv("RUN_FOR")); raw != "" {
 		runFor, err = time.ParseDuration(raw)
@@ -117,7 +110,6 @@ func LoadConfig(getenv func(string) string) (Config, error) {
 		Secret:           secret,
 		Region:           region,
 		Vantage:          vantage,
-		MachineID:        machineID,
 		RunFor:           runFor,
 		Continuous:       continuous,
 		ProcessNice:      processNice,

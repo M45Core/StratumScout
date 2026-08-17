@@ -21,7 +21,6 @@ import (
 
 func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {
 	allowLocalEndpointDial(t)
-	useImmediatePings(t)
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -83,14 +82,17 @@ func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {
 			serverErr <- err
 			return
 		}
-
-		id, err = readMethod(model.ProtocolPing)
-		if err != nil {
-			serverErr <- err
-			return
+		for index, previousHash := range []string{strings.Repeat("0", 64), strings.Repeat("1", 64)} {
+			if err := respond(map[string]any{
+				"id": nil, "method": "mining.notify",
+				"params": []any{fmt.Sprintf("job-%d", index), previousHash, "00", "00", []any{}, "20000000", "17034219", "66ad0000", true},
+			}); err != nil {
+				serverErr <- err
+				return
+			}
 		}
-		time.Sleep(6 * time.Millisecond)
-		serverErr <- respond(map[string]any{"id": id, "result": "pong", "error": nil})
+
+		serverErr <- nil
 	}()
 
 	address := listener.Addr().(*net.TCPAddr)
@@ -104,30 +106,38 @@ func TestWatchSessionMeasuresProtocolResponses(t *testing.T) {
 	}
 	close(out)
 
-	records := map[string]model.Observation{}
+	records := map[string]model.ProtocolSample{}
+	var forwarded *event
 	for e := range out {
 		if e.protocol != nil {
-			records[e.protocol.ProtocolMethod] = *e.protocol
+			records[e.protocolMethod] = *e.protocol
+		}
+		if e.prevHash != "" {
+			candidate := e
+			forwarded = &candidate
 		}
 	}
-	for _, method := range []string{model.ProtocolConnect, model.ProtocolSubscribe, model.ProtocolAuthorize, model.ProtocolPing} {
+	for _, method := range []string{model.ProtocolConnect, model.ProtocolSubscribe, model.ProtocolAuthorize} {
 		record, ok := records[method]
 		if !ok {
 			t.Errorf("missing %s timing", method)
 			continue
 		}
-		if record.RecordType != model.RecordTypeProtocol || record.ResponseStatus != model.ProtocolStatusOK {
+		if record.ResponseStatus != model.ProtocolStatusOK {
 			t.Errorf("%s record=%+v", method, record)
 		}
-		if record.DurationMS == nil || *record.DurationMS < 0 {
+		if record.DurationMS < 0 {
 			t.Errorf("%s duration=%v", method, record.DurationMS)
 		}
 	}
-	if got := records[model.ProtocolSubscribe].DurationMS; got == nil || *got < 8 {
+	if got := records[model.ProtocolSubscribe].DurationMS; got < 8 {
 		t.Errorf("subscribe timing did not include response delay: %v", got)
 	}
-	if got := records[model.ProtocolAuthorize].DurationMS; got == nil || *got < 5 {
+	if got := records[model.ProtocolAuthorize].DurationMS; got < 5 {
 		t.Errorf("authorize timing did not include response delay: %v", got)
+	}
+	if forwarded == nil || forwarded.prevHash != strings.Repeat("1", 64) || forwarded.at.IsZero() {
+		t.Fatalf("forwarded block candidate=%+v", forwarded)
 	}
 }
 
@@ -169,19 +179,6 @@ func TestResponseIDRejectsMalformedValues(t *testing.T) {
 	}
 }
 
-func TestRandomizedDurationBounds(t *testing.T) {
-	minimum, jitter := 15*time.Second, 30*time.Second
-	for range 100 {
-		got, err := randomizedDuration(minimum, jitter)
-		if err != nil {
-			t.Fatal(err)
-		}
-		if got < minimum || got > minimum+jitter {
-			t.Fatalf("randomized duration %s outside [%s,%s]", got, minimum, minimum+jitter)
-		}
-	}
-}
-
 func TestWatchSessionReportsInvalidTLSCertificate(t *testing.T) {
 	allowLocalEndpointDial(t)
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -198,9 +195,9 @@ func TestWatchSessionReportsInvalidTLSCertificate(t *testing.T) {
 	}
 	close(out)
 
-	var tlsRecord *model.Observation
+	var tlsRecord *model.ProtocolSample
 	for e := range out {
-		if e.protocol != nil && e.protocol.ProtocolMethod == model.ProtocolTLSHandshake {
+		if e.protocol != nil && e.protocolMethod == model.ProtocolTLSHandshake {
 			record := *e.protocol
 			tlsRecord = &record
 		}
@@ -248,7 +245,7 @@ func TestWatchSessionBoundsTLSHandshake(t *testing.T) {
 	<-serverDone
 	close(out)
 	for event := range out {
-		if event.protocol != nil && event.protocol.ProtocolMethod == model.ProtocolTLSHandshake {
+		if event.protocol != nil && event.protocolMethod == model.ProtocolTLSHandshake {
 			if event.protocol.ResponseStatus != model.ProtocolStatusTimeout {
 				t.Fatalf("TLS timeout record=%+v", *event.protocol)
 			}
@@ -262,11 +259,11 @@ func TestPublishProtocolUsesWireCompletionTime(t *testing.T) {
 	started := time.Date(2026, 8, 14, 12, 0, 0, 0, time.UTC)
 	finished := started.Add(1234 * time.Microsecond)
 	out := make(chan event, 1)
-	if err := publishProtocolAt(context.Background(), out, "pool", model.Endpoint{Host: "pool.example", Port: 3333}, model.ProtocolPing, started, finished, model.ProtocolStatusOK, ""); err != nil {
+	if err := publishProtocolAt(context.Background(), out, "pool", model.Endpoint{Host: "pool.example", Port: 3333}, model.ProtocolConnect, started, finished, model.ProtocolStatusOK, ""); err != nil {
 		t.Fatal(err)
 	}
 	record := (<-out).protocol
-	if record == nil || record.DurationMS == nil || *record.DurationMS != 1.234 {
+	if record == nil || record.DurationMS != 1.234 {
 		t.Fatalf("protocol record=%+v, want exact wire duration", record)
 	}
 	if !record.ObservedAt.Equal(finished) {
@@ -330,14 +327,5 @@ func allowLocalEndpointDial(t *testing.T) {
 	dialEndpoint = dialer.DialContext
 	t.Cleanup(func() {
 		dialEndpoint = original
-	})
-}
-
-func useImmediatePings(t *testing.T) {
-	t.Helper()
-	originalMin, originalJitter := pingInitialDelayMin, pingInitialDelayJitter
-	pingInitialDelayMin, pingInitialDelayJitter = 0, 0
-	t.Cleanup(func() {
-		pingInitialDelayMin, pingInitialDelayJitter = originalMin, originalJitter
 	})
 }

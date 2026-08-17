@@ -11,369 +11,82 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"strconv"
-	"strings"
-	"sync"
 	"time"
 
 	"github.com/M45Core/StratumScout/internal/model"
 )
 
 const (
-	batchSize                    = 100
-	queueLimit                   = 2000
-	batchInterval                = 5 * time.Second
-	initialBackoff               = 250 * time.Millisecond
-	maxBackoff                   = 5 * time.Second
-	maxRetryAfter                = 30 * time.Second
+	blockEnvelopeVersion         = 2
 	maxCompressedEnvelopeBytes   = 256 << 10
 	maxDecompressedEnvelopeBytes = 1 << 20
 )
 
-var (
-	errEnvelopeTooLarge = errors.New("encoded envelope exceeds collector limits")
-	envelopeGZIPWriters = sync.Pool{
-		New: func() any { return gzip.NewWriter(io.Discard) },
-	}
-	envelopeBuffers = sync.Pool{
-		New: func() any { return new(bytes.Buffer) },
-	}
-)
+var errEnvelopeTooLarge = errors.New("encoded block sample exceeds collector limits")
 
+// envelope version 2 carries one Bitcoin block sample. There is deliberately
+// no observation array, run summary, queue sequence, or time-based batch.
 type envelope struct {
-	SchemaVersion  int                 `json:"schema_version"`
-	BatchID        string              `json:"batch_id"`
-	RunID          string              `json:"run_id"`
-	AgentVersion   string              `json:"agent_version"`
-	ConfigRevision string              `json:"config_revision"`
-	Region         string              `json:"region"`
-	Vantage        string              `json:"vantage"`
-	MachineID      string              `json:"machine_id"`
-	StartedAt      time.Time           `json:"started_at"`
-	SentAt         time.Time           `json:"sent_at"`
-	Observations   []model.Observation `json:"observations"`
-}
-
-type uploadStats struct {
-	Uploaded int
-	Dropped  int
-	Failed   bool
+	SchemaVersion    int               `json:"schema_version"`
+	BatchID          string            `json:"batch_id"`
+	ConfigRevision   string            `json:"config_revision"`
+	Region           string            `json:"region"`
+	FilterContinents bool              `json:"filter_continents,omitempty"`
+	Sample           model.BlockSample `json:"sample"`
 }
 
 type postResult struct {
-	batchID    string
-	accepted   int
-	retry      bool
-	retryAfter time.Duration
-}
-
-type observationQueue struct {
-	entries []model.Observation
-	head    int
-	size    int
-}
-
-func (q *observationQueue) push(record model.Observation) bool {
-	if q.size == queueLimit {
-		q.entries[q.head] = record
-		q.head = (q.head + 1) % len(q.entries)
-		return true
-	}
-	if q.size == len(q.entries) {
-		capacity := len(q.entries) * 2
-		if capacity < batchSize {
-			capacity = batchSize
-		}
-		if capacity > queueLimit {
-			capacity = queueLimit
-		}
-		grown := make([]model.Observation, capacity)
-		q.copyOldest(grown[:q.size])
-		q.entries = grown
-		q.head = 0
-	}
-	index := (q.head + q.size) % len(q.entries)
-	q.entries[index] = record
-	q.size++
-	return false
-}
-
-func (q *observationQueue) pop(count int) []model.Observation {
-	if count > q.size {
-		count = q.size
-	}
-	if count == 0 {
-		return nil
-	}
-	batch := make([]model.Observation, count)
-	q.copyOldest(batch)
-	for index := range count {
-		q.entries[(q.head+index)%len(q.entries)] = model.Observation{}
-	}
-	q.head = (q.head + count) % len(q.entries)
-	q.size -= count
-	if q.size == 0 {
-		q.head = 0
-	}
-	return batch
-}
-
-func (q *observationQueue) copyOldest(destination []model.Observation) {
-	if len(destination) == 0 {
-		return
-	}
-	first := min(len(destination), len(q.entries)-q.head)
-	copy(destination, q.entries[q.head:q.head+first])
-	copy(destination[first:], q.entries[:len(destination)-first])
-}
-
-func (q *observationQueue) clear() int {
-	count := q.size
-	q.entries = nil
-	q.head = 0
-	q.size = 0
-	return count
+	batchID  string
+	accepted int
 }
 
 type uploader struct {
-	cfg           Config
-	runID         string
-	startedAt     time.Time
-	revision      string
-	ingestURL     *url.URL
-	wake          chan struct{}
-	stop          chan struct{}
-	done          chan struct{}
-	mu            sync.Mutex
-	queue         observationQueue
-	sequence      uint64
-	batchSequence uint64
-	uploaded      int
-	dropped       int
-	failed        bool
-	closed        bool
+	cfg       Config
+	revision  string
+	ingestURL *url.URL
 }
 
-func newUploader(ctx context.Context, cfg Config, runID string, startedAt time.Time, revision string) *uploader {
-	u := &uploader{
-		cfg:       cfg,
-		runID:     runID,
-		startedAt: startedAt,
-		revision:  revision,
+func newUploader(cfg Config, revision string) *uploader {
+	return &uploader{
+		cfg: cfg, revision: revision,
 		ingestURL: cfg.CollectorURL.ResolveReference(&url.URL{Path: "/api/v1/ingest"}),
-		wake:      make(chan struct{}, 1),
-		stop:      make(chan struct{}),
-		done:      make(chan struct{}),
-	}
-	go u.loop(ctx)
-	return u
-}
-
-func (u *uploader) enqueue(records []model.Observation) error {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	if u.closed {
-		return errors.New("uploader is closed")
-	}
-	for _, record := range records {
-		u.sequence++
-		record.ObservationID = sequenceID(u.runID, u.sequence)
-		record.RunID = u.runID
-		if u.queue.push(record) {
-			u.dropped++
-			u.failed = true
-		}
-	}
-	if u.queue.size >= batchSize {
-		select {
-		case u.wake <- struct{}{}:
-		default:
-		}
-	}
-	return nil
-}
-
-func (u *uploader) loop(ctx context.Context) {
-	defer close(u.done)
-	ticker := time.NewTicker(batchInterval)
-	defer ticker.Stop()
-	for {
-		select {
-		case <-ctx.Done():
-			u.closeAndDropRemaining()
-			return
-		case <-ticker.C:
-			u.flushOne(ctx)
-		case <-u.wake:
-			u.flushOne(ctx)
-		case <-u.stop:
-			for u.pending() > 0 && ctx.Err() == nil {
-				u.flushOne(ctx)
-			}
-			if ctx.Err() != nil {
-				u.closeAndDropRemaining()
-			}
-			return
-		}
 	}
 }
 
-func (u *uploader) flushOne(ctx context.Context) {
-	batch := u.takeBatch()
-	if len(batch) == 0 {
-		return
+// uploadBlock performs one bounded attempt for one Bitcoin block. A failure is
+// returned to the caller for logging and the sample is never retried or split.
+func (u *uploader) uploadBlock(ctx context.Context, sample model.BlockSample) error {
+	if sample.BlockID == "" {
+		return errors.New("invalid block sample")
 	}
-	failed := u.uploadRecords(ctx, batch)
-	if failed > 0 {
-		log.Print("upload batch failed permanently")
-		u.mu.Lock()
-		u.dropped += failed
-		u.failed = true
-		u.mu.Unlock()
-	}
-}
-
-func (u *uploader) uploadRecords(ctx context.Context, records []model.Observation) int {
-	if len(records) == 0 {
-		return 0
-	}
-	if ctx.Err() != nil {
-		return len(records)
-	}
-	err := u.postWithRetry(ctx, records)
-	if errors.Is(err, errEnvelopeTooLarge) && len(records) > 1 {
-		middle := len(records) / 2
-		return u.uploadRecords(ctx, records[:middle]) + u.uploadRecords(ctx, records[middle:])
-	}
-	if err != nil {
-		return len(records)
-	}
-	return 0
-}
-
-func (u *uploader) takeBatch() []model.Observation {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.queue.pop(batchSize)
-}
-
-func (u *uploader) pending() int {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return u.queue.size
-}
-
-func (u *uploader) closeAndDropRemaining() {
-	u.mu.Lock()
-	u.closed = true
-	dropped := u.queue.clear()
-	u.dropped += dropped
-	u.failed = u.failed || dropped > 0
-	u.mu.Unlock()
-}
-
-func (u *uploader) closeAndFlush() uploadStats {
-	u.mu.Lock()
-	if !u.closed {
-		u.closed = true
-		close(u.stop)
-	}
-	u.mu.Unlock()
-	<-u.done
-	return u.stats()
-}
-
-func (u *uploader) stats() uploadStats {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	return uploadStats{Uploaded: u.uploaded, Dropped: u.dropped, Failed: u.failed}
-}
-
-func (u *uploader) uploadFinal(ctx context.Context, record model.Observation) error {
-	u.mu.Lock()
-	u.sequence++
-	record.ObservationID = sequenceID(u.runID, u.sequence)
-	record.RunID = u.runID
-	u.mu.Unlock()
-	return u.postWithRetry(ctx, []model.Observation{record})
-}
-
-func (u *uploader) postWithRetry(ctx context.Context, records []model.Observation) error {
-	u.mu.Lock()
-	u.batchSequence++
-	batchID := u.runID + "-batch-" + strconv.FormatUint(u.batchSequence, 10)
-	u.mu.Unlock()
-	sentAt := time.Now().UTC()
-	compressed := envelopeBuffers.Get().(*bytes.Buffer)
-	compressed.Reset()
-	defer func() {
-		if compressed.Cap() <= maxCompressedEnvelopeBytes {
-			compressed.Reset()
-			envelopeBuffers.Put(compressed)
-		}
-	}()
-	uncompressedBytes, err := encodeEnvelopeInto(compressed, envelope{
-		SchemaVersion:  1,
-		BatchID:        batchID,
-		RunID:          u.runID,
-		AgentVersion:   AgentVersion,
-		ConfigRevision: u.revision,
-		Region:         u.cfg.Region,
-		Vantage:        u.cfg.Vantage,
-		MachineID:      u.cfg.MachineID,
-		StartedAt:      u.startedAt,
-		SentAt:         sentAt,
-		Observations:   records,
+	batchID := u.cfg.Region + "-" + sample.BlockID
+	var compressed bytes.Buffer
+	uncompressedBytes, err := encodeEnvelopeInto(&compressed, envelope{
+		SchemaVersion: blockEnvelopeVersion, BatchID: batchID,
+		ConfigRevision: u.revision, Region: u.cfg.Region, FilterContinents: u.cfg.FilterContinents,
+		Sample: sample,
 	})
 	if err != nil {
 		return err
 	}
-	payload := compressed.Bytes()
-	if len(payload) > maxCompressedEnvelopeBytes || uncompressedBytes > maxDecompressedEnvelopeBytes {
-		return fmt.Errorf("%w: compressed=%d decompressed=%d", errEnvelopeTooLarge, len(payload), uncompressedBytes)
+	if envelopeTooLarge(compressed.Len(), uncompressedBytes) {
+		return fmt.Errorf("%w: compressed=%d decompressed=%d", errEnvelopeTooLarge, compressed.Len(), uncompressedBytes)
 	}
-	backoff := initialBackoff
-	for {
-		result, err := u.post(ctx, payload)
-		if err == nil && result.accepted >= 0 && (result.batchID != batchID || result.accepted != len(records)) {
-			result.retry = true
-			err = errors.New("collector acknowledgement does not match batch")
-		}
-		if err == nil {
-			accepted := result.accepted
-			if accepted < 0 {
-				// The collector has already appended this exact batch but its
-				// original acknowledgement was lost. It has no response count
-				// on the duplicate path, so retain the known batch size locally.
-				accepted = len(records)
-			}
-			u.mu.Lock()
-			u.uploaded += accepted
-			u.mu.Unlock()
-			return nil
-		}
-		if !result.retry {
-			return err
-		}
-		delay := backoff
-		if result.retryAfter > delay {
-			delay = result.retryAfter
-		}
-		timer := time.NewTimer(delay)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
-			return ctx.Err()
-		case <-timer.C:
-		}
-		backoff *= 2
-		if backoff > maxBackoff {
-			backoff = maxBackoff
-		}
+	result, err := u.post(ctx, compressed.Bytes())
+	if err != nil {
+		return err
 	}
+	if result.accepted >= 0 && (result.batchID != batchID || result.accepted != 1) {
+		return errors.New("collector acknowledgement does not match block sample")
+	}
+	return nil
+}
+
+func envelopeTooLarge(compressedBytes, uncompressedBytes int) bool {
+	return compressedBytes > maxCompressedEnvelopeBytes || uncompressedBytes > maxDecompressedEnvelopeBytes
 }
 
 type countingWriter struct {
@@ -389,12 +102,7 @@ func (w *countingWriter) Write(value []byte) (int, error) {
 
 func encodeEnvelopeInto(compressed *bytes.Buffer, value envelope) (int, error) {
 	compressed.Reset()
-	writer := envelopeGZIPWriters.Get().(*gzip.Writer)
-	writer.Reset(compressed)
-	defer func() {
-		writer.Reset(io.Discard)
-		envelopeGZIPWriters.Put(writer)
-	}()
+	writer := gzip.NewWriter(compressed)
 	counter := &countingWriter{writer: writer}
 	if err := json.NewEncoder(counter).Encode(value); err != nil {
 		_ = writer.Close()
@@ -422,13 +130,13 @@ func (u *uploader) post(ctx context.Context, payload []byte) (postResult, error)
 	request.Header.Set("X-StratumStats-Signature", hex.EncodeToString(mac.Sum(nil)))
 	response, err := u.cfg.Client.Do(request)
 	if err != nil {
-		return postResult{retry: true}, err
+		return postResult{}, err
 	}
 	defer response.Body.Close()
 	if response.StatusCode == http.StatusAccepted {
 		batchID, accepted, err := parseAccepted(response.Body)
 		if err != nil {
-			return postResult{retry: true}, fmt.Errorf("decode collector acknowledgement: %w", err)
+			return postResult{}, fmt.Errorf("decode collector acknowledgement: %w", err)
 		}
 		return postResult{batchID: batchID, accepted: accepted}, nil
 	}
@@ -437,26 +145,5 @@ func (u *uploader) post(ctx context.Context, payload []byte) (postResult, error)
 		return postResult{accepted: -1}, nil
 	}
 	_, _ = io.Copy(io.Discard, io.LimitReader(response.Body, 4096))
-	err = fmt.Errorf("collector returned HTTP %d", response.StatusCode)
-	retry := response.StatusCode == http.StatusTooManyRequests || response.StatusCode >= 500
-	return postResult{retry: retry, retryAfter: retryAfterDelay(response.Header.Get("Retry-After"), time.Now())}, err
-}
-
-func retryAfterDelay(value string, now time.Time) time.Duration {
-	value = strings.TrimSpace(value)
-	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil && seconds > 0 {
-		if seconds >= int64(maxRetryAfter/time.Second) {
-			return maxRetryAfter
-		}
-		return time.Duration(seconds) * time.Second
-	}
-	when, err := http.ParseTime(value)
-	if err != nil || !when.After(now) {
-		return 0
-	}
-	delay := when.Sub(now)
-	if delay > maxRetryAfter {
-		return maxRetryAfter
-	}
-	return delay
+	return postResult{}, fmt.Errorf("collector returned HTTP %d", response.StatusCode)
 }

@@ -13,7 +13,7 @@ func TestRandomIdentity(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(a.Username) < 30 || a.Agent == "" || len(a.PayoutScript) != 25 {
+	if len(a.Username) < 30 || a.Agent == "" {
 		t.Fatalf("bad identity: %+v", a)
 	}
 	b, err := RandomIdentity()

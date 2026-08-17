@@ -2,20 +2,18 @@ package probe
 
 import (
 	"bufio"
+	"bytes"
 	"context"
-	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
-	"math/big"
 	"net"
 	"net/netip"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -26,46 +24,23 @@ const (
 	blockWindow           = 30 * time.Second
 	activeBlockLimit      = 32
 	completedBlockLimit   = 256
-	connectionRefreshMin  = 105 * time.Minute
-	connectionRefreshSpan = 30 * time.Minute
 	maxStratumMessageSize = 256 << 10
 )
-
-// ErrConnectionRefresh asks the long-lived Scout runner to recreate its pool
-// sessions without terminating the process or its current reporting cohort.
-var ErrConnectionRefresh = errors.New("refresh Stratum connections")
 
 var (
 	errPoolRejected           = errors.New("pool rejected probe")
 	errStratumMessageTooLarge = errors.New("stratum message exceeds size limit")
 	requestTimeout            = 30 * time.Second
-	pingInitialDelayMin       = 15 * time.Second
-	pingInitialDelayJitter    = 30 * time.Second
-	pingIntervalMin           = 45 * time.Second
-	pingIntervalJitter        = 30 * time.Second
-	pingResponseWindow        = 10 * time.Second
-	sessionReadTimeout        = 90 * time.Second
 	dialEndpoint              = dialPublicEndpoint
 	sharedAddressRange        = netip.MustParsePrefix("100.64.0.0/10")
 )
 
 type event struct {
-	poolID, prevHash         string
-	connectionID             string
-	at                       time.Time
-	hasTransactions          bool
-	verified                 bool
-	coinbaseAnalyzed         bool
-	blockHeight              uint64
-	workerWalletSeen         bool
-	coinbaseTotalSats        uint64
-	workerPayoutSats         uint64
-	coinbaseOutputs          []model.CoinbaseOutput
-	coinbaseOutputCount      int
-	coinbaseOutputsTruncated bool
-	coinbaseOmittedSats      uint64
-	estimatedPoolFeePct      *float64
-	protocol                 *model.Observation
+	poolID, prevHash string
+	connectionID     string
+	at               time.Time
+	protocolMethod   string
+	protocol         *model.ProtocolSample
 }
 
 type endpointTarget struct {
@@ -79,22 +54,15 @@ type activeBlock struct {
 	started  time.Time
 	eligible map[string]endpointTarget
 	arrivals map[string]time.Time
-	empty    map[string]bool
-	invalid  map[string]bool
-	payout   map[string]event
 }
 
-// Collect connects to every configured endpoint and emits block and protocol
-// observations. A non-zero second callback argument is the start of the next
-// reporting cohort after every overlapping block window has closed. It submits
-// no shares and never stores randomized credentials.
-func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func([]model.Observation, time.Time) error) error {
+// Collect connects to every configured endpoint and emits exactly one nested
+// sample for each completed Bitcoin block. Setup timings are retained in
+// memory, folded into the next block sample, and never uploaded independently.
+// It submits no shares and never stores randomized credentials.
+func Collect(ctx context.Context, pools []model.Pool, emit func(model.BlockSample) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	refreshAge, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
-	if err != nil {
-		return err
-	}
 	events := make(chan event, 256)
 	configured := make(map[string]endpointTarget)
 	var wg sync.WaitGroup
@@ -117,21 +85,52 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 	blocks := map[string]*activeBlock{}
 	completedBlocks := map[string]bool{}
 	completedBlockOrder := make([]string, 0, completedBlockLimit)
-	cohortHasCompletedBlock := false
-	refreshEligibleAt := time.Now().Add(refreshAge)
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	handleEvent := func(e event) error {
+	pendingSetup := make(map[string]model.EndpointSetup)
+	var closeTimer *time.Timer
+	var closeTimerC <-chan time.Time
+	defer func() {
+		if closeTimer != nil {
+			closeTimer.Stop()
+		}
+	}()
+	scheduleClose := func() {
+		deadline, ok := nextBlockDeadline(blocks)
+		if !ok {
+			if closeTimer != nil && !closeTimer.Stop() {
+				select {
+				case <-closeTimer.C:
+				default:
+				}
+			}
+			closeTimerC = nil
+			return
+		}
+		delay := time.Until(deadline)
+		if delay < 0 {
+			delay = 0
+		}
+		if closeTimer == nil {
+			closeTimer = time.NewTimer(delay)
+		} else {
+			if !closeTimer.Stop() {
+				select {
+				case <-closeTimer.C:
+				default:
+				}
+			}
+			closeTimer.Reset(delay)
+		}
+		closeTimerC = closeTimer.C
+	}
+	handleEvent := func(e event) {
 		if e.protocol != nil {
-			record := *e.protocol
-			record.Vantage = vantage
-			return emit([]model.Observation{record}, time.Time{})
+			recordProtocolSample(pendingSetup, e)
+			return
 		}
 		r := activeBlockForEvent(blocks, completedBlocks, configured, e)
 		if r != nil {
 			recordBlockEvent(r, e)
 		}
-		return nil
 	}
 	for {
 		select {
@@ -141,71 +140,67 @@ func Collect(ctx context.Context, pools []model.Pool, vantage string, emit func(
 			if !ok {
 				return nil
 			}
-			if err := handleEvent(e); err != nil {
-				return err
-			}
-		case now := <-ticker.C:
+			handleEvent(e)
+			scheduleClose()
+		case now := <-closeTimerC:
 			// Consume everything already buffered before deciding which block
-			// windows have closed. Otherwise a ready ticker can win the select
-			// while an arrival for the closing window is still queued, causing
-			// that endpoint's on-time observation to be discarded as late.
-			closed, err := drainBufferedEvents(events, handleEvent)
-			if err != nil {
-				return err
-			}
+			// windows have closed. Otherwise the timer can win the select while
+			// an arrival for the closing window is still queued.
+			closed := drainBufferedEvents(events, handleEvent)
 			if closed {
 				return nil
 			}
-			completedBlock := false
-			for id, r := range blocks {
+			closing := make([]*activeBlock, 0, len(blocks))
+			for _, r := range blocks {
 				if now.Sub(r.started) >= blockWindow {
-					observations := blockObservations(r, vantage)
-					if len(observations) > 0 {
-						if err := emit(observations, time.Time{}); err != nil {
-							return err
-						}
-						cohortHasCompletedBlock = true
+					closing = append(closing, r)
+				}
+			}
+			sort.Slice(closing, func(i, j int) bool {
+				if closing[i].started.Equal(closing[j].started) {
+					return closing[i].id < closing[j].id
+				}
+				return closing[i].started.Before(closing[j].started)
+			})
+			for _, r := range closing {
+				sample, ok := blockSample(r, pendingSetup)
+				if ok {
+					if err := emit(sample); err != nil {
+						return err
 					}
-					completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, id)
-					delete(blocks, id)
-					completedBlock = true
+					clear(pendingSetup)
 				}
+				completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, r.id)
+				delete(blocks, r.id)
 			}
-			if shouldCompleteCohort(cohortHasCompletedBlock, len(blocks)) {
-				if err := emit(nil, now.UTC()); err != nil {
-					return err
-				}
-				cohortHasCompletedBlock = false
-			}
-			if shouldRefreshConnections(now, refreshEligibleAt, completedBlock, len(blocks)) {
-				return ErrConnectionRefresh
-			}
+			scheduleClose()
 		}
 	}
 }
 
-func drainBufferedEvents(events <-chan event, handle func(event) error) (bool, error) {
-	// Bound the drain to the snapshot that was buffered when the tick won the
+func nextBlockDeadline(blocks map[string]*activeBlock) (time.Time, bool) {
+	var next time.Time
+	for _, block := range blocks {
+		deadline := block.started.Add(blockWindow)
+		if next.IsZero() || deadline.Before(next) {
+			next = deadline
+		}
+	}
+	return next, !next.IsZero()
+}
+
+func drainBufferedEvents(events <-chan event, handle func(event)) bool {
+	// Bound the drain to the snapshot that was buffered when the timer won the
 	// select. Producers remain free to enqueue newer events without starving
 	// block-window completion.
 	for range len(events) {
 		e, ok := <-events
 		if !ok {
-			return true, nil
+			return true
 		}
-		if err := handle(e); err != nil {
-			return false, err
-		}
+		handle(e)
 	}
-	return false, nil
-}
-
-func shouldRefreshConnections(now, eligibleAt time.Time, completedBlock bool, activeBlocks int) bool {
-	return completedBlock && !now.Before(eligibleAt) && activeBlocks == 0
-}
-
-func shouldCompleteCohort(hasCompletedBlock bool, activeBlocks int) bool {
-	return hasCompletedBlock && activeBlocks == 0
+	return false
 }
 
 // rememberCompletedBlock bounds process-lifetime deduplication state. The
@@ -224,45 +219,70 @@ func rememberCompletedBlock(completed map[string]bool, order []string, id string
 	return append(order, id)
 }
 
-func blockObservations(block *activeBlock, vantage string) []model.Observation {
-	if len(block.arrivals) < 2 {
-		return nil
+func blockSample(block *activeBlock, pendingSetup map[string]model.EndpointSetup) (model.BlockSample, bool) {
+	if len(block.arrivals) == 0 {
+		return model.BlockSample{}, false
 	}
-	var first time.Time
-	for _, at := range block.arrivals {
-		if first.IsZero() || at.Before(first) {
-			first = at
-		}
-	}
-	ids := make([]string, 0, len(block.eligible))
-	for id := range block.eligible {
+	ids := make([]string, 0, len(block.arrivals)+len(pendingSetup))
+	included := make(map[string]bool, cap(ids))
+	for id := range block.arrivals {
+		included[id] = true
 		ids = append(ids, id)
 	}
-	sort.Strings(ids)
-	out := make([]model.Observation, 0, len(ids))
-	for _, id := range ids {
-		target := block.eligible[id]
-		at, arrived := block.arrivals[id]
-		payout := block.payout[id]
-		observation := model.Observation{Version: model.ObservationVersion, ObservedAt: block.started.UTC(), Vantage: vantage, BlockID: block.id, BlockHeight: payout.blockHeight, PoolID: target.poolID, Endpoint: target.address, Eligible: true, Arrived: arrived, EmptyFirst: block.empty[id], TLS: target.tls}
-		observation.CoinbaseAnalyzed = payout.coinbaseAnalyzed
-		observation.WorkerWalletInCoinbase = payout.workerWalletSeen
-		observation.CoinbaseTotalSats = payout.coinbaseTotalSats
-		observation.WorkerPayoutSats = payout.workerPayoutSats
-		observation.CoinbaseOutputs = payout.coinbaseOutputs
-		observation.CoinbaseOutputCount = payout.coinbaseOutputCount
-		observation.CoinbaseOutputsTruncated = payout.coinbaseOutputsTruncated
-		observation.CoinbaseOmittedSats = payout.coinbaseOmittedSats
-		observation.EstimatedPoolFeePct = payout.estimatedPoolFeePct
-		if block.invalid[id] {
-			observation.ErrorCategory = "invalid_job"
+	for id := range pendingSetup {
+		if !included[id] {
+			ids = append(ids, id)
 		}
-		if arrived {
-			observation.OffsetMS = float64(at.Sub(first).Microseconds()) / 1000
-		}
-		out = append(out, observation)
 	}
-	return out
+	sort.Strings(ids)
+	endpointSamples := make([]model.ForwardedEndpointSample, 0, len(ids))
+	for _, id := range ids {
+		target, configured := block.eligible[id]
+		if !configured {
+			continue
+		}
+		at, arrived := block.arrivals[id]
+		endpointSample := model.ForwardedEndpointSample{PoolID: target.poolID, Endpoint: target.address, TLS: target.tls}
+		if arrived {
+			receivedAt := at.UTC()
+			endpointSample.ReceivedAt = &receivedAt
+		}
+		if setup, ok := pendingSetup[id]; ok {
+			setupCopy := setup
+			endpointSample.Setup = &setupCopy
+		}
+		endpointSamples = append(endpointSamples, endpointSample)
+	}
+	return model.BlockSample{
+		BlockID:         block.id,
+		EndpointSamples: endpointSamples,
+	}, true
+}
+
+func recordProtocolSample(pending map[string]model.EndpointSetup, e event) {
+	if e.protocol == nil || e.connectionID == "" {
+		return
+	}
+	setup := pending[e.connectionID]
+	// A new connect attempt supersedes the setup path from the preceding
+	// session. Later stages then fill this same compact result in place.
+	if e.protocolMethod == model.ProtocolConnect {
+		setup = model.EndpointSetup{}
+	}
+	sample := *e.protocol
+	switch e.protocolMethod {
+	case model.ProtocolConnect:
+		setup.Connect = &sample
+	case model.ProtocolTLSHandshake:
+		setup.TLS = &sample
+	case model.ProtocolSubscribe:
+		setup.Subscribe = &sample
+	case model.ProtocolAuthorize:
+		setup.Authorize = &sample
+	default:
+		return
+	}
+	pending[e.connectionID] = setup
 }
 
 // activeBlockForEvent prevents late jobs from reopening a measurement window
@@ -274,13 +294,10 @@ func activeBlockForEvent(blocks map[string]*activeBlock, completed map[string]bo
 	if block := blocks[e.prevHash]; block != nil {
 		return block
 	}
-	// A new window needs at least one structurally valid template. Bound the
-	// number of simultaneous windows so hostile prev-hash churn cannot retain
-	// unbounded per-endpoint evidence during the 30-second collection period.
-	if !e.verified || len(blocks) >= activeBlockLimit {
+	if e.prevHash == "" || len(blocks) >= activeBlockLimit {
 		return nil
 	}
-	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}, empty: map[string]bool{}, invalid: map[string]bool{}, payout: map[string]event{}}
+	block := &activeBlock{id: e.prevHash, started: e.at, eligible: map[string]endpointTarget{}, arrivals: map[string]time.Time{}}
 	for id, target := range configured {
 		block.eligible[id] = target
 	}
@@ -388,101 +405,27 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 	if ready != nil {
 		ready()
 	}
+	// awaitResponse bounds setup operations with a read deadline. Once the
+	// long-lived session is authorized, clear it and let the context-driven
+	// connection close interrupt an otherwise idle pool. Scout sends no pings.
+	if err := conn.SetReadDeadline(time.Time{}); err != nil {
+		return err
+	}
 
 	connectionID := endpointConnectionID(poolID, address, endpoint.TLS)
 	var window notifyWindow
-	pingID := 2
-	pingPending := false
-	pingDisabled := false
-	pingStarted := time.Time{}
-	pingDeadline := time.Time{}
-	initialPingDelay, err := randomizedDuration(pingInitialDelayMin, pingInitialDelayJitter)
-	if err != nil {
-		return err
-	}
-	nextPing := time.Now().Add(initialPingDelay)
 
 	for {
-		now := time.Now()
-		if !pingDisabled && !pingPending && !nextPing.IsZero() && !now.Before(nextPing) {
-			pingID++
-			pingStarted = now
-			if err := request(w, pingID, model.ProtocolPing, []any{}, identity.wireStyle); err != nil {
-				_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, model.ProtocolStatusError, "ping_write_failed")
-				return err
-			}
-			pingPending = true
-			pingDeadline = now.Add(pingResponseWindow)
-		}
-
-		readDeadline := now.Add(sessionReadTimeout)
-		if pingPending && pingDeadline.Before(readDeadline) {
-			readDeadline = pingDeadline
-		}
-		if !pingDisabled && !pingPending && !nextPing.IsZero() && nextPing.Before(readDeadline) {
-			readDeadline = nextPing
-		}
-		if err := conn.SetReadDeadline(readDeadline); err != nil {
-			return err
-		}
-		line, err := readStratumMessage(r)
-		receivedAt := time.Now()
+		line, receivedAt, err := readStratumMessage(r)
 		if err != nil {
 			if ctx.Err() != nil {
 				return ctx.Err()
 			}
-			now = time.Now()
-			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
-				if pingPending && !now.Before(pingDeadline) {
-					if publishErr := publishProtocol(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, model.ProtocolStatusTimeout, "ping_timeout"); publishErr != nil {
-						return publishErr
-					}
-					pingPending, pingDisabled = false, true
-					continue
-				}
-				if !pingDisabled && !pingPending && !nextPing.IsZero() && !now.Before(nextPing) {
-					continue
-				}
-			}
-			if pingPending {
-				_ = publishProtocol(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, model.ProtocolStatusError, "ping_connection_closed")
-			}
 			return err
 		}
 
-		var msg struct {
-			ID     any             `json:"id"`
-			Method string          `json:"method"`
-			Params []any           `json:"params"`
-			Result json.RawMessage `json:"result"`
-			Error  any             `json:"error"`
-		}
+		var msg stratumNotification
 		if json.Unmarshal(line, &msg) != nil {
-			continue
-		}
-		if pingPending && responseID(msg.ID) == pingID {
-			status, category := model.ProtocolStatusOK, ""
-			if msg.Error != nil {
-				status, category = model.ProtocolStatusUnsupported, "ping_unsupported"
-				pingDisabled = true
-			} else {
-				var pong string
-				if json.Unmarshal(msg.Result, &pong) != nil || !strings.EqualFold(pong, "pong") {
-					status, category = model.ProtocolStatusError, "ping_invalid_response"
-					pingDisabled = true
-				}
-			}
-			if err := publishProtocolAt(ctx, out, poolID, endpoint, model.ProtocolPing, pingStarted, receivedAt, status, category); err != nil {
-				return err
-			}
-			pingPending = false
-			if !pingDisabled {
-				interval, err := randomizedDuration(pingIntervalMin, pingIntervalJitter)
-				if err != nil {
-					return err
-				}
-				nextPing = time.Now().Add(interval)
-			}
 			continue
 		}
 		if msg.Method == "client.get_version" {
@@ -491,26 +434,17 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 			}
 			continue
 		}
-		if msg.Method != "mining.notify" || len(msg.Params) < 9 {
+		if msg.Method != "mining.notify" || msg.Params.count < 9 {
 			continue
 		}
-		prev, ok := msg.Params[1].(string)
-		if !ok || prev == "" {
+		prev := msg.Params.previousHash
+		if !validBlockHash(prev) {
 			continue
 		}
-		clean, _ := msg.Params[8].(bool)
-		branchStrings := parseMerkleBranches(msg.Params[4])
-		if !window.accept(prev, clean, len(branchStrings) > 0) {
+		if !window.accept(prev, msg.Params.clean) {
 			continue
 		}
-		job := Job{PrevHash: prev, MerkleBranches: branchStrings, ExtraNonce1: extraNonce1, ExtraNonce2Size: extraNonce2Size, WorkerScript: identity.PayoutScript}
-		job.Coinbase1, _ = msg.Params[2].(string)
-		job.Coinbase2, _ = msg.Params[3].(string)
-		job.Version, _ = msg.Params[5].(string)
-		job.Bits, _ = msg.Params[6].(string)
-		job.NTime, _ = msg.Params[7].(string)
-		verification := VerifyJob(job)
-		e := event{poolID: poolID, connectionID: connectionID, prevHash: prev, at: receivedAt, hasTransactions: len(branchStrings) > 0, verified: verification.Valid, blockHeight: verification.BlockHeight, coinbaseAnalyzed: verification.CoinbaseAnalyzed, workerWalletSeen: verification.WorkerWalletSeen, coinbaseTotalSats: verification.CoinbaseTotalSats, workerPayoutSats: verification.WorkerPayoutSats, coinbaseOutputs: verification.CoinbaseOutputs, coinbaseOutputCount: verification.CoinbaseOutputCount, coinbaseOutputsTruncated: verification.CoinbaseOutputsTruncated, coinbaseOmittedSats: verification.CoinbaseOmittedSats, estimatedPoolFeePct: verification.EstimatedPoolFeePct}
+		e := event{poolID: poolID, connectionID: connectionID, prevHash: prev, at: receivedAt}
 		select {
 		case out <- e:
 		case <-ctx.Done():
@@ -519,78 +453,149 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 	}
 }
 
-func parseMerkleBranches(value any) []string {
-	branches, ok := value.([]any)
-	if !ok {
-		// Preserve one invalid entry so VerifyJob rejects a malformed branch
-		// container instead of treating it as a valid empty branch list.
-		return []string{""}
+type stratumNotification struct {
+	ID     any          `json:"id"`
+	Method string       `json:"method"`
+	Params notifyParams `json:"params"`
+}
+
+// notifyParams extracts only the previous-block hash and clean-jobs flag. The
+// other mining.notify parameters can contain a large coinbase and merkle branch
+// list; Scout never needs to decode or retain them.
+type notifyParams struct {
+	previousHash string
+	clean        bool
+	count        int
+}
+
+func (params *notifyParams) UnmarshalJSON(data []byte) error {
+	*params = notifyParams{}
+	data = bytes.TrimSpace(data)
+	if len(data) < 2 || data[0] != '[' {
+		return errors.New("invalid Stratum parameter array")
 	}
-	parsed := make([]string, len(branches))
-	for index, branch := range branches {
-		parsed[index], _ = branch.(string)
+	start := 1
+	depth := 0
+	inString := false
+	escaped := false
+	consume := func(end int) error {
+		value := bytes.TrimSpace(data[start:end])
+		if len(value) == 0 {
+			return errors.New("empty Stratum parameter")
+		}
+		switch params.count {
+		case 1:
+			if err := json.Unmarshal(value, &params.previousHash); err != nil {
+				return err
+			}
+		case 8:
+			if err := json.Unmarshal(value, &params.clean); err != nil {
+				return err
+			}
+		}
+		params.count++
+		return nil
 	}
-	return parsed
+	for index := 1; index < len(data); index++ {
+		character := data[index]
+		if inString {
+			if escaped {
+				escaped = false
+				continue
+			}
+			if character == '\\' {
+				escaped = true
+			} else if character == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '[', '{':
+			depth++
+		case '}':
+			if depth == 0 {
+				return errors.New("invalid Stratum parameter nesting")
+			}
+			depth--
+		case ']':
+			if depth > 0 {
+				depth--
+				continue
+			}
+			if len(bytes.TrimSpace(data[start:index])) > 0 {
+				if err := consume(index); err != nil {
+					return err
+				}
+			}
+			if len(bytes.TrimSpace(data[index+1:])) != 0 {
+				return errors.New("trailing Stratum parameter data")
+			}
+			return nil
+		case ',':
+			if depth == 0 {
+				if err := consume(index); err != nil {
+					return err
+				}
+				start = index + 1
+			}
+		}
+	}
+	return errors.New("unterminated Stratum parameter array")
+}
+
+func validBlockHash(value string) bool {
+	if len(value) != 64 {
+		return false
+	}
+	for _, character := range value {
+		if (character < '0' || character > '9') && (character < 'a' || character > 'f') && (character < 'A' || character > 'F') {
+			return false
+		}
+	}
+	return true
 }
 
 type notifyWindow struct {
-	previous           string
-	active             bool
-	transactionJobSent bool
+	previous string
 }
 
 // accept rejects the initial current-block job and every update for it. A
 // measurement window opens only after this connection observes a clean
 // previous-hash transition, so startup timing cannot masquerade as block
 // propagation latency.
-func (window *notifyWindow) accept(previousHash string, clean, hasTransactions bool) bool {
+func (window *notifyWindow) accept(previousHash string, clean bool) bool {
 	if window.previous == "" {
 		window.previous = previousHash
 		return false
 	}
-	if previousHash != window.previous {
-		if !clean {
-			return false
-		}
-		window.previous = previousHash
-		window.active = true
-		window.transactionJobSent = false
-	}
-	if !window.active || (hasTransactions && window.transactionJobSent) {
+	if previousHash == window.previous || !clean {
 		return false
 	}
-	if hasTransactions {
-		window.transactionJobSent = true
-	}
+	window.previous = previousHash
 	return true
 }
 
-// recordBlockEvent keeps the earliest structurally valid template for an endpoint.
-// A coinbase-only template is useful work and counts immediately; the presence
-// of transaction branches is retained only as raw empty-first evidence.
+// recordBlockEvent keeps only the earliest timestamped transition for an
+// endpoint. Later jobs for the same block never reach this point.
 func recordBlockEvent(block *activeBlock, e event) {
 	id := e.connectionID
 	if id == "" {
 		id = e.poolID
 	}
-	if e.verified {
-		if block.started.IsZero() || e.at.Before(block.started) {
-			block.started = e.at
-		}
+	if e.prevHash == "" {
+		return
+	}
+	if block.started.IsZero() || e.at.Before(block.started) {
+		block.started = e.at
 	}
 	if !block.started.IsZero() && e.at.After(block.started.Add(blockWindow)) {
 		return
 	}
-	if !e.hasTransactions {
-		block.empty[id] = true
-	}
-	if !e.verified {
-		block.invalid[id] = true
-		return
-	}
 	if old, exists := block.arrivals[id]; !exists || e.at.Before(old) {
 		block.arrivals[id] = e.at
-		block.payout[id] = e
 	}
 }
 
@@ -604,20 +609,18 @@ func publishProtocol(ctx context.Context, out chan<- event, poolID string, endpo
 
 func publishProtocolAt(ctx context.Context, out chan<- event, poolID string, endpoint model.Endpoint, method string, started, finished time.Time, status, errorCategory string) error {
 	duration := float64(finished.Sub(started).Nanoseconds()) / float64(time.Millisecond)
-	record := model.Observation{
-		Version:        model.ObservationVersion,
-		RecordType:     model.RecordTypeProtocol,
+	record := model.ProtocolSample{
 		ObservedAt:     finished.UTC(),
-		PoolID:         poolID,
-		Endpoint:       net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port)),
-		ProtocolMethod: method,
-		DurationMS:     &duration,
+		DurationMS:     duration,
 		ResponseStatus: status,
-		TLS:            endpoint.TLS,
 		ErrorCategory:  errorCategory,
 	}
+	address := net.JoinHostPort(endpoint.Host, strconv.Itoa(endpoint.Port))
 	select {
-	case out <- event{poolID: poolID, protocol: &record}:
+	case out <- event{
+		poolID: poolID, connectionID: endpointConnectionID(poolID, address, endpoint.TLS),
+		protocolMethod: method, protocol: &record,
+	}:
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()
@@ -660,17 +663,6 @@ func request(w *bufio.Writer, id int, method string, params any, style stratumWi
 	return w.Flush()
 }
 
-func randomizedDuration(minimum, jitter time.Duration) (time.Duration, error) {
-	if jitter <= 0 {
-		return minimum, nil
-	}
-	n, err := rand.Int(rand.Reader, big.NewInt(int64(jitter)+1))
-	if err != nil {
-		return 0, err
-	}
-	return minimum + time.Duration(n.Int64()), nil
-}
-
 func response(w *bufio.Writer, id any, result any) error {
 	b, err := json.Marshal(map[string]any{"id": id, "result": result, "error": nil})
 	if err != nil {
@@ -691,8 +683,7 @@ func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio
 		if err := conn.SetReadDeadline(deadline); err != nil {
 			return nil, nil, time.Now(), err
 		}
-		line, err := readStratumMessage(r)
-		receivedAt := time.Now()
+		line, receivedAt, err := readStratumMessage(r)
 		if err != nil {
 			return nil, nil, receivedAt, err
 		}
@@ -718,29 +709,36 @@ func awaitResponse(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio
 	}
 }
 
-func readStratumMessage(reader *bufio.Reader) ([]byte, error) {
+func readStratumMessage(reader *bufio.Reader) ([]byte, time.Time, error) {
+	// Peek blocks only until the first byte is readable. Capture the timestamp
+	// there instead of after ReadSlice has waited for a potentially large
+	// newline-delimited notification to finish arriving.
+	if _, err := reader.Peek(1); err != nil {
+		return nil, time.Now(), err
+	}
+	receivedAt := time.Now()
 	fragment, err := reader.ReadSlice('\n')
 	if len(fragment) > maxStratumMessageSize {
-		return nil, errStratumMessageTooLarge
+		return nil, receivedAt, errStratumMessageTooLarge
 	}
 	if err == nil {
-		return fragment, nil
+		return fragment, receivedAt, nil
 	}
 	if !errors.Is(err, bufio.ErrBufferFull) {
-		return nil, err
+		return nil, receivedAt, err
 	}
 	message := append([]byte(nil), fragment...)
 	for {
 		fragment, err = reader.ReadSlice('\n')
 		if len(message)+len(fragment) > maxStratumMessageSize {
-			return nil, errStratumMessageTooLarge
+			return nil, receivedAt, errStratumMessageTooLarge
 		}
 		message = append(message, fragment...)
 		if err == nil {
-			return message, nil
+			return message, receivedAt, nil
 		}
 		if !errors.Is(err, bufio.ErrBufferFull) {
-			return nil, err
+			return nil, receivedAt, err
 		}
 	}
 }
