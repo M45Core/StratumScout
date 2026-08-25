@@ -37,7 +37,7 @@ func TestLoadConfig(t *testing.T) {
 		t.Fatal("collector redirects are not disabled")
 	}
 	for region, vantage := range map[string]string{
-		"iad": "us-east",
+		"ewr": "us-east",
 		"fra": "europe",
 		"lax": "us-west",
 		"nrt": "japan",
@@ -52,7 +52,7 @@ func TestLoadConfig(t *testing.T) {
 			t.Fatalf("%s vantage=%q, want %q", region, cfg.Vantage, vantage)
 		}
 	}
-	for _, retired := range []string{"dfw", "ewr"} {
+	for _, retired := range []string{"dfw", "iad"} {
 		environment["FLY_REGION"] = retired
 		if _, err := LoadConfig(func(key string) string { return environment[key] }); err == nil {
 			t.Fatalf("retired region %s accepted", retired)

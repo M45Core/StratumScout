@@ -72,7 +72,7 @@ work are not attributed to the pool.
 | `PROCESS_NICE` | no | `0` | Linux scheduler niceness from 0 through 19 |
 | `FILTER_CONTINENTS` | no | `false` | Skip endpoints explicitly assigned to another continent |
 
-Supported Fly mappings are `iad` to `us-east`, `fra` to `europe`, `lax` to
+Supported Fly mappings are `ewr` to `us-east`, `fra` to `europe`, `lax` to
 `us-west`, `nrt` to `japan`, and `sin` to `singapore`.
 The embedded [`regions.json`](internal/model/regions.json) is synchronized with
 StratumStats and controls which `FLY_REGION` values are accepted. Disabled
@@ -97,7 +97,7 @@ secret set.
 ## BTCFlux co-location
 
 The production co-location layout uses independent scratch-based BTCFlux and
-StratumScout images inside one 256 MiB Fly Machine in each of `iad`, `fra`,
+StratumScout images inside one 256 MiB Fly Machine in each of `ewr`, `fra`,
 `lax`, `nrt`, and `sin`. Fly Pilot supplies the multi-container init; neither runtime
 image contains Alpine or a shell.
 
