@@ -43,10 +43,27 @@ func BenchmarkDecodeStratumNotification(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(raw)))
 	for b.Loop() {
-		var got stratumNotification
-		if err := json.Unmarshal(raw, &got); err != nil {
+		if _, err := decodeStratumNotification(raw); err != nil {
 			b.Fatal(err)
 		}
+	}
+}
+
+func TestDecodeStratumNotificationHandlesFieldOrderAndSpacing(t *testing.T) {
+	blockID := strings.Repeat("b", 64)
+	raw := []byte(` { "params" : ["job","` + blockID + `","01","02",[],"v","b","t",true], "method" : "mining.notify", "id" : null } `)
+	got, err := decodeStratumNotification(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Method != "mining.notify" || got.Params.previousHash != blockID || !got.Params.clean || got.Params.count != 9 {
+		t.Fatalf("notification=%+v params=%+v", got, got.Params)
+	}
+}
+
+func TestDecodeStratumNotificationRejectsMalformedJSON(t *testing.T) {
+	if _, err := decodeStratumNotification([]byte(`{"id":null,"method":"mining.notify","params":[]`)); err == nil {
+		t.Fatal("malformed JSON was accepted")
 	}
 }
 

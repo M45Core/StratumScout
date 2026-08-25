@@ -12,6 +12,7 @@ import (
 	"math"
 	"net"
 	"net/netip"
+	"runtime"
 	"sort"
 	"strconv"
 	"sync"
@@ -25,6 +26,8 @@ const (
 	activeBlockLimit      = 32
 	completedBlockLimit   = 256
 	maxStratumMessageSize = 256 << 10
+	largeMessageCapacity  = 64 << 10
+	stratumReaderSize     = maxStratumMessageSize
 )
 
 var (
@@ -358,7 +361,10 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 		conn = tlsConn
 	}
 
-	r := bufio.NewReader(conn)
+	// Keep every accepted mining.notify message in reusable connection memory.
+	// One hundred connections consume about 25 MiB in exchange for avoiding
+	// growth, copying, and garbage collection on the read path.
+	r := bufio.NewReaderSize(conn, stratumReaderSize)
 	w := bufio.NewWriter(conn)
 	subscribeStarted := time.Now()
 	if err := request(w, 1, "mining.subscribe", []string{identity.Agent}, identity.wireStyle); err != nil {
@@ -433,8 +439,8 @@ func watchSessionWithReady(ctx context.Context, poolID string, endpoint model.En
 			return err
 		}
 
-		var msg stratumNotification
-		if json.Unmarshal(line, &msg) != nil {
+		msg, err := decodeStratumNotification(line)
+		if err != nil {
 			continue
 		}
 		if msg.Method == "client.get_version" {
@@ -471,6 +477,187 @@ type stratumNotification struct {
 	Params notifyParams `json:"params"`
 }
 
+// decodeStratumNotification avoids the generic encoding/json object walk on
+// the receive path. json.Valid still rejects malformed network input, then the
+// narrow walk below stops as soon as the fields needed for the recognized
+// method have been found. In the usual id/method/params order this means a
+// mining.notify params array is traversed only by the narrow params parser.
+func decodeStratumNotification(data []byte) (stratumNotification, error) {
+	var notification stratumNotification
+	data = bytes.TrimSpace(data)
+	if !json.Valid(data) || len(data) < 2 || data[0] != '{' {
+		return notification, errors.New("invalid Stratum notification")
+	}
+
+	var idJSON, paramsJSON []byte
+	for offset := 1; offset < len(data); {
+		offset = skipJSONSpace(data, offset)
+		if offset >= len(data) || data[offset] == '}' {
+			break
+		}
+		keyEnd := jsonStringEnd(data, offset)
+		if keyEnd < 0 {
+			return notification, errors.New("invalid Stratum notification key")
+		}
+		key := data[offset:keyEnd]
+		offset = skipJSONSpace(data, keyEnd)
+		if offset >= len(data) || data[offset] != ':' {
+			return notification, errors.New("invalid Stratum notification field")
+		}
+		valueStart := skipJSONSpace(data, offset+1)
+		if string(key) == `"params"` && notification.Method == "mining.notify" {
+			params, _, err := parseNotifyParams(data[valueStart:])
+			if err != nil {
+				return stratumNotification{}, err
+			}
+			notification.Params = params
+			return notification, nil
+		}
+		valueEnd := jsonValueEnd(data, valueStart)
+		if valueEnd < 0 {
+			return notification, errors.New("invalid Stratum notification value")
+		}
+
+		switch string(key) {
+		case `"id"`:
+			idJSON = data[valueStart:valueEnd]
+		case `"method"`:
+			switch string(data[valueStart:valueEnd]) {
+			case `"mining.notify"`:
+				notification.Method = "mining.notify"
+			case `"client.get_version"`:
+				notification.Method = "client.get_version"
+			default:
+				method, err := decodeJSONString(data[valueStart:valueEnd])
+				if err != nil {
+					return stratumNotification{}, err
+				}
+				notification.Method = method
+			}
+		case `"params"`:
+			paramsJSON = data[valueStart:valueEnd]
+		}
+
+		if notification.Method == "mining.notify" && paramsJSON != nil {
+			params, consumed, err := parseNotifyParams(paramsJSON)
+			if err != nil || len(bytes.TrimSpace(paramsJSON[consumed:])) != 0 {
+				if err == nil {
+					err = errors.New("trailing Stratum parameter data")
+				}
+				return stratumNotification{}, err
+			}
+			notification.Params = params
+			return notification, nil
+		}
+		if notification.Method == "client.get_version" && idJSON != nil {
+			id, err := decodeJSONAny(idJSON)
+			if err != nil {
+				return stratumNotification{}, err
+			}
+			notification.ID = id
+			return notification, nil
+		}
+
+		offset = skipJSONSpace(data, valueEnd)
+		if offset < len(data) && data[offset] == ',' {
+			offset++
+		}
+	}
+	return notification, nil
+}
+
+func decodeJSONString(data []byte) (string, error) {
+	var value string
+	if err := json.Unmarshal(data, &value); err != nil {
+		return "", err
+	}
+	return value, nil
+}
+
+func decodeJSONAny(data []byte) (any, error) {
+	var value any
+	if err := json.Unmarshal(data, &value); err != nil {
+		return nil, err
+	}
+	return value, nil
+}
+
+func skipJSONSpace(data []byte, offset int) int {
+	for offset < len(data) {
+		switch data[offset] {
+		case ' ', '\t', '\r', '\n':
+			offset++
+		default:
+			return offset
+		}
+	}
+	return offset
+}
+
+func jsonStringEnd(data []byte, start int) int {
+	if start >= len(data) || data[start] != '"' {
+		return -1
+	}
+	escaped := false
+	for offset := start + 1; offset < len(data); offset++ {
+		if escaped {
+			escaped = false
+			continue
+		}
+		switch data[offset] {
+		case '\\':
+			escaped = true
+		case '"':
+			return offset + 1
+		}
+	}
+	return -1
+}
+
+func jsonValueEnd(data []byte, start int) int {
+	if start >= len(data) {
+		return -1
+	}
+	if data[start] == '"' {
+		return jsonStringEnd(data, start)
+	}
+	depth := 0
+	inString := false
+	escaped := false
+	for offset := start; offset < len(data); offset++ {
+		character := data[offset]
+		if inString {
+			if escaped {
+				escaped = false
+			} else if character == '\\' {
+				escaped = true
+			} else if character == '"' {
+				inString = false
+			}
+			continue
+		}
+		switch character {
+		case '"':
+			inString = true
+		case '[', '{':
+			depth++
+		case ']', '}':
+			if depth == 0 {
+				return offset
+			}
+			depth--
+			if depth == 0 {
+				return offset + 1
+			}
+		case ',':
+			if depth == 0 {
+				return offset
+			}
+		}
+	}
+	return -1
+}
+
 // notifyParams extracts the previous-block hash and clean-jobs flag while
 // retaining zero-copy slices for the two coinbase strings. Those strings are
 // decoded only after a new block transition is accepted, so same-block job
@@ -484,37 +671,27 @@ type notifyParams struct {
 }
 
 func (params *notifyParams) UnmarshalJSON(data []byte) error {
-	*params = notifyParams{}
+	parsed, consumed, err := parseNotifyParams(data)
+	if err != nil {
+		return err
+	}
+	if len(bytes.TrimSpace(data[consumed:])) != 0 {
+		return errors.New("trailing Stratum parameter data")
+	}
+	*params = parsed
+	return nil
+}
+
+func parseNotifyParams(data []byte) (notifyParams, int, error) {
+	var params notifyParams
 	data = bytes.TrimSpace(data)
 	if len(data) < 2 || data[0] != '[' {
-		return errors.New("invalid Stratum parameter array")
+		return params, 0, errors.New("invalid Stratum parameter array")
 	}
 	start := 1
 	depth := 0
 	inString := false
 	escaped := false
-	consume := func(end int) error {
-		value := bytes.TrimSpace(data[start:end])
-		if len(value) == 0 {
-			return errors.New("empty Stratum parameter")
-		}
-		switch params.count {
-		case 1:
-			if err := json.Unmarshal(value, &params.previousHash); err != nil {
-				return err
-			}
-		case 2:
-			params.coinbase1JSON = value
-		case 3:
-			params.coinbase2JSON = value
-		case 8:
-			if err := json.Unmarshal(value, &params.clean); err != nil {
-				return err
-			}
-		}
-		params.count++
-		return nil
-	}
 	for index := 1; index < len(data); index++ {
 		character := data[index]
 		if inString {
@@ -536,7 +713,7 @@ func (params *notifyParams) UnmarshalJSON(data []byte) error {
 			depth++
 		case '}':
 			if depth == 0 {
-				return errors.New("invalid Stratum parameter nesting")
+				return params, 0, errors.New("invalid Stratum parameter nesting")
 			}
 			depth--
 		case ']':
@@ -545,24 +722,74 @@ func (params *notifyParams) UnmarshalJSON(data []byte) error {
 				continue
 			}
 			if len(bytes.TrimSpace(data[start:index])) > 0 {
-				if err := consume(index); err != nil {
-					return err
+				if err := consumeNotifyParam(&params, data[start:index]); err != nil {
+					return params, 0, err
 				}
 			}
-			if len(bytes.TrimSpace(data[index+1:])) != 0 {
-				return errors.New("trailing Stratum parameter data")
-			}
-			return nil
+			return params, index + 1, nil
 		case ',':
 			if depth == 0 {
-				if err := consume(index); err != nil {
-					return err
+				if err := consumeNotifyParam(&params, data[start:index]); err != nil {
+					return params, 0, err
 				}
 				start = index + 1
 			}
 		}
 	}
-	return errors.New("unterminated Stratum parameter array")
+	return params, 0, errors.New("unterminated Stratum parameter array")
+}
+
+func consumeNotifyParam(params *notifyParams, value []byte) error {
+	value = bytes.TrimSpace(value)
+	if len(value) == 0 {
+		return errors.New("empty Stratum parameter")
+	}
+	switch params.count {
+	case 1:
+		previousHash, err := decodeNotifyHash(value)
+		if err != nil {
+			return err
+		}
+		params.previousHash = previousHash
+	case 2:
+		params.coinbase1JSON = value
+	case 3:
+		params.coinbase2JSON = value
+	case 8:
+		clean, err := decodeNotifyClean(value)
+		if err != nil {
+			return err
+		}
+		params.clean = clean
+	}
+	params.count++
+	return nil
+}
+
+func decodeNotifyHash(value []byte) (string, error) {
+	if len(value) == 66 && value[0] == '"' && value[len(value)-1] == '"' && !bytes.ContainsRune(value, '\\') {
+		return string(value[1 : len(value)-1]), nil
+	}
+	var hash string
+	if err := json.Unmarshal(value, &hash); err != nil {
+		return "", err
+	}
+	return hash, nil
+}
+
+func decodeNotifyClean(value []byte) (bool, error) {
+	switch string(value) {
+	case "true":
+		return true, nil
+	case "false":
+		return false, nil
+	default:
+		var clean bool
+		if err := json.Unmarshal(value, &clean); err != nil {
+			return false, err
+		}
+		return clean, nil
+	}
 }
 
 func (params notifyParams) coinbaseSource(extraNonce1 string, extraNonce2Size int, workerScriptSHA256 string) *model.CoinbaseSource {
@@ -759,6 +986,11 @@ func readStratumMessage(reader *bufio.Reader) ([]byte, time.Time, error) {
 		return nil, time.Now(), err
 	}
 	receivedAt := time.Now()
+	// A shared-CPU Machine can execute only one endpoint goroutine at a time.
+	// Yield after recording the first-byte boundary so other ready connections
+	// can record their arrivals before this goroutine reads and parses its full
+	// notification.
+	runtime.Gosched()
 	fragment, err := reader.ReadSlice('\n')
 	if len(fragment) > maxStratumMessageSize {
 		return nil, receivedAt, errStratumMessageTooLarge
@@ -769,7 +1001,12 @@ func readStratumMessage(reader *bufio.Reader) ([]byte, time.Time, error) {
 	if !errors.Is(err, bufio.ErrBufferFull) {
 		return nil, receivedAt, err
 	}
-	message := append([]byte(nil), fragment...)
+	capacity := largeMessageCapacity
+	if len(fragment) > capacity {
+		capacity = len(fragment)
+	}
+	message := make([]byte, len(fragment), capacity)
+	copy(message, fragment)
 	for {
 		fragment, err = reader.ReadSlice('\n')
 		if len(message)+len(fragment) > maxStratumMessageSize {

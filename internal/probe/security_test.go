@@ -88,16 +88,24 @@ func TestPublicEndpointAddressFilter(t *testing.T) {
 }
 
 func BenchmarkReadStratumMessage(b *testing.B) {
-	message := []byte(`{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000"]}` + "\n")
-	var source bytes.Reader
-	reader := bufio.NewReaderSize(&source, 4096)
-	b.ReportAllocs()
-	for b.Loop() {
-		source.Reset(message)
-		reader.Reset(&source)
-		line, _, err := readStratumMessage(reader)
-		if err != nil || len(line) != len(message) {
-			b.Fatalf("read %d bytes: %v", len(line), err)
-		}
+	_, large := largeNotifyMessage()
+	for name, message := range map[string][]byte{
+		"small": []byte(`{"id":null,"method":"mining.notify","params":["job","0000000000000000000000000000000000000000000000000000000000000000"]}` + "\n"),
+		"large": append([]byte(large), '\n'),
+	} {
+		b.Run(name, func(b *testing.B) {
+			var source bytes.Reader
+			reader := bufio.NewReaderSize(&source, stratumReaderSize)
+			b.ReportAllocs()
+			b.SetBytes(int64(len(message)))
+			for b.Loop() {
+				source.Reset(message)
+				reader.Reset(&source)
+				line, _, err := readStratumMessage(reader)
+				if err != nil || len(line) != len(message) {
+					b.Fatalf("read %d bytes: %v", len(line), err)
+				}
+			}
+		})
 	}
 }
