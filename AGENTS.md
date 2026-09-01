@@ -27,6 +27,9 @@ minimal.
 - Never add periodic measurement uploads, Stratum pings, or a second upload for
   connect, TLS, subscribe, or authorize timing. Attach any available setup
   timing to the next block batch and omit unavailable values.
+- Keep planned session refreshes jittered, comfortably inside StratumStats's
+  24-hour protocol window, and defer them until every active block window has
+  closed. The completed block still gets exactly one ordinary upload.
 - Attempt each block upload once. Do not queue, spool, split, or retry it. If
   StratumStats is unavailable, drop that block without disturbing the Stratum
   endpoint connections.

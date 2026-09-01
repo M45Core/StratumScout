@@ -32,13 +32,16 @@ closes. A block sample is never split, queued, or retried. If the collector is
 unavailable, that block is dropped and the Stratum sessions continue unchanged.
 
 Connect, TLS, subscribe, and authorize timings are held only until the next
-block. Sessions reconnect only after an actual disconnect; Scout does not tear
-down healthy sessions to manufacture setup samples. If no reconnect operation
-occurred, the corresponding JSON field is omitted rather than populated with
-stale data. Multiple attempts before one block collapse to the latest connection
-path. Scout does not send Stratum ping requests, and an idle authorized session
-remains blocked on its network read. Collector configuration is fetched once at
-process startup and changes take effect when Scout restarts.
+block. Each Scout chooses a connection age from 1 hour 45 minutes through 2
+hours 15 minutes. After reaching that age, it waits for the next completed
+30-second block window, uploads that block, and recreates its pool sessions.
+The jitter keeps regional Scouts from reconnecting together, while the block
+boundary keeps the brief planned gap outside an active measurement window.
+Ordinary disconnects still reconnect with bounded backoff. Multiple attempts
+before one block collapse to the latest connection path. Scout does not send
+Stratum ping requests, and an idle authorized session remains blocked on its
+network read. Collector configuration is fetched once at process startup and
+changes take effect when Scout restarts.
 
 Each accepted request is the completion proof for its entire block sample; no
 separate protocol or terminal records are uploaded. An unexpected observation
@@ -86,7 +89,8 @@ non-zero value is rejected on non-Linux platforms.
 Set `CONTINUOUS=false` only for a bounded one-shot diagnostic process. In the
 production mode, `RUN_FOR` does not impose a periodic cutoff: Scout remains
 connected until a block, reports approximately 30 seconds after the first
-observation, and continues waiting on the same sessions without reconnecting.
+observation, and continues waiting with planned session refreshes after safe
+block boundaries.
 
 Never place ingest credentials in an image, `fly.toml`, ordinary Machine
 environment, logs, or command-line arguments. Load them as Fly app secrets.

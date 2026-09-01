@@ -4,12 +4,14 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
 	"math"
+	"math/big"
 	"net"
 	"net/netip"
 	"runtime"
@@ -22,13 +24,22 @@ import (
 )
 
 const (
-	blockWindow           = 30 * time.Second
-	activeBlockLimit      = 32
-	completedBlockLimit   = 256
+	blockWindow         = 30 * time.Second
+	activeBlockLimit    = 32
+	completedBlockLimit = 256
+	// Periodic session replacement keeps setup telemetry comfortably inside
+	// StratumStats's rolling 24-hour protocol window. The process-level jitter
+	// prevents every regional Scout from reconnecting at the same time.
+	connectionRefreshMin  = 105 * time.Minute
+	connectionRefreshSpan = 30 * time.Minute
 	maxStratumMessageSize = 256 << 10
 	largeMessageCapacity  = 64 << 10
 	stratumReaderSize     = maxStratumMessageSize
 )
+
+// ErrConnectionRefresh asks the long-lived Scout runner to recreate its pool
+// sessions after the current block sample has been uploaded.
+var ErrConnectionRefresh = errors.New("refresh Stratum connections")
 
 var (
 	errPoolRejected           = errors.New("pool rejected probe")
@@ -68,6 +79,11 @@ type activeBlock struct {
 func Collect(ctx context.Context, pools []model.Pool, emit func(model.BlockSample) error) error {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	refreshAge, err := randomizedDuration(connectionRefreshMin, connectionRefreshSpan)
+	if err != nil {
+		return err
+	}
+	refreshEligibleAt := time.Now().Add(refreshAge)
 	events := make(chan event, 256)
 	configured := make(map[string]endpointTarget)
 	var wg sync.WaitGroup
@@ -178,9 +194,18 @@ func Collect(ctx context.Context, pools []model.Pool, emit func(model.BlockSampl
 				completedBlockOrder = rememberCompletedBlock(completedBlocks, completedBlockOrder, r.id)
 				delete(blocks, r.id)
 			}
+			if shouldRefreshConnections(now, refreshEligibleAt, len(closing) > 0, len(blocks)) {
+				cancel()
+				wg.Wait()
+				return ErrConnectionRefresh
+			}
 			scheduleClose()
 		}
 	}
+}
+
+func shouldRefreshConnections(now, eligibleAt time.Time, completedBlock bool, activeBlocks int) bool {
+	return completedBlock && !now.Before(eligibleAt) && activeBlocks == 0
 }
 
 func nextBlockDeadline(blocks map[string]*activeBlock) (time.Time, bool) {
@@ -1020,6 +1045,17 @@ func readStratumMessage(reader *bufio.Reader) ([]byte, time.Time, error) {
 			return nil, receivedAt, err
 		}
 	}
+}
+
+func randomizedDuration(minimum, jitter time.Duration) (time.Duration, error) {
+	if jitter <= 0 {
+		return minimum, nil
+	}
+	n, err := rand.Int(rand.Reader, big.NewInt(int64(jitter)+1))
+	if err != nil {
+		return 0, err
+	}
+	return minimum + time.Duration(n.Int64()), nil
 }
 
 func dialPublicEndpoint(ctx context.Context, network, address string) (net.Conn, error) {

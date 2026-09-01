@@ -97,7 +97,14 @@ func Run(ctx context.Context, cfg Config) error {
 		log.Printf("probe block=%s endpoints=%d uploaded", sample.BlockID, len(sample.EndpointSamples))
 		return nil
 	}
-	collectErr := probe.Collect(measureCtx, pools, emit)
+	var collectErr error
+	for {
+		collectErr = probe.Collect(measureCtx, pools, emit)
+		if !errors.Is(collectErr, probe.ErrConnectionRefresh) {
+			break
+		}
+		log.Print("refreshing Stratum sessions after maximum connection age")
+	}
 	if ctx.Err() != nil {
 		return nil
 	}
