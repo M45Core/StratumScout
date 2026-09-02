@@ -240,6 +240,9 @@ type PoolReport struct {
 	LatestPayoutDestinations          []PayoutDestination  `json:"latest_payout_destinations,omitempty"`
 	LatestPayoutDestinationsTruncated bool                 `json:"latest_payout_destinations_truncated,omitempty"`
 	LatestPayoutOmittedSats           uint64               `json:"latest_payout_omitted_sats,omitempty"`
+	InvalidJobCount                   int                  `json:"invalid_job_count,omitempty"`
+	LatestInvalidJobAt                *time.Time           `json:"latest_invalid_job_at,omitempty"`
+	LatestInvalidJobBlockID           string               `json:"latest_invalid_job_block_id,omitempty"`
 	TemplateLatencyHistory            []MetricHistoryPoint `json:"template_latency_history,omitempty"`
 	PoolFeeHistory                    []MetricHistoryPoint `json:"pool_fee_history,omitempty"`
 }
