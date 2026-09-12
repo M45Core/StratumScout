@@ -1,0 +1,18 @@
+[
+  {
+    "code": "fra",
+    "city": "Frankfurt",
+    "country": "Germany",
+    "enabled": true,
+    "vm_cpus": 1,
+    "vm_memory_mb": 256
+  },
+  {
+    "code": "lax",
+    "city": "Los Angeles",
+    "country": "United States",
+    "enabled": true,
+    "vm_cpus": 1,
+    "vm_memory_mb": 256
+  }
+]

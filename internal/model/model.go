@@ -144,6 +144,9 @@ type PayoutDestination struct {
 type MetricHistoryPoint struct {
 	ObservedAt time.Time `json:"observed_at"`
 	Value      float64   `json:"value"`
+	// Win marks a zero-delay template: this endpoint was first to the clean
+	// block transition in its measured cohort.
+	Win bool `json:"win,omitempty"`
 }
 
 // Observation is the immutable evidence used to produce reports. OffsetMS is
@@ -211,6 +214,9 @@ type PoolReport struct {
 	Arrivals                          int                  `json:"arrivals"`
 	EligibleChecks                    int                  `json:"eligible_checks"`
 	DeliveryChecks                    int                  `json:"delivery_checks"`
+	Wins                              int                  `json:"wins"`
+	WinEligibleBlocks                 int                  `json:"win_eligible_blocks"`
+	WinPercentage                     *float64             `json:"win_percentage,omitempty"`
 	MedianMS                          *float64             `json:"median_ms"`
 	P95MS                             *float64             `json:"p95_ms"`
 	EstimatedMiningLossPct            *float64             `json:"estimated_mining_loss_pct"`

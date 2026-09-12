@@ -81,10 +81,9 @@ The embedded [`regions.json`](internal/model/regions.json) is synchronized with
 StratumStats and controls which `FLY_REGION` values are accepted. Disabled
 catalog entries remain documented but cannot upload measurements.
 
-`PROCESS_NICE=10` is the recommended setting when Scout shares a Fly Machine
-with a latency-sensitive BTCFlux edge. BTCFlux remains at its normal priority;
-Scout voluntarily receives less CPU when both processes are runnable. A
-non-zero value is rejected on non-Linux platforms.
+`PROCESS_NICE=0` is used in the dedicated production Fly app. A higher value is
+useful only for an intentional diagnostic co-location with a latency-sensitive
+process. A non-zero value is rejected on non-Linux platforms.
 
 Set `CONTINUOUS=false` only for a bounded one-shot diagnostic process. In the
 production mode, `RUN_FOR` does not impose a periodic cutoff: Scout remains
@@ -98,18 +97,19 @@ Fly exposes app secrets to every container in a multi-container Machine, so
 co-location deliberately expands both processes' access to the combined app's
 secret set.
 
-## BTCFlux co-location
+## Fly deployment
 
-The production co-location layout uses independent scratch-based BTCFlux and
-StratumScout images inside one 256 MiB Fly Machine in each of `ewr`, `fra`,
-`lax`, `nrt`, and `sin`. Fly Pilot supplies the multi-container init; neither runtime
-image contains Alpine or a shell.
+The operator-owned Fly deployment is a dedicated StratumScout app with
+continuous Machines in FRA and LAX. It does not share Machines, images, or
+secrets with BTCFlux. The EWR Scout remains an independent VPS deployment;
+NRT and SIN remain valid measurement vantages but are not in this Fly
+inventory.
 
-The complete build, migration, validation, upgrade, and rollback procedure is
-maintained in the BTCFlux
-[Scout sidecar runbook](https://github.com/Distortions81/BTCFlux/blob/main/deploy/SCOUT_SIDECAR.md).
-General measurement design and collector operations belong in the main
-StratumStats repository.
+[`deploy/fly-regions.json`](deploy/fly-regions.json) is the Fly Machine source
+of truth. See the [Fly deployment runbook](deploy/FLY_DEPLOYMENT.md) for the
+immutable-image, region-by-region migration, validation, update, and rollback
+procedure. General measurement design and collector operations belong in the
+main StratumStats repository.
 
 ## Development
 
