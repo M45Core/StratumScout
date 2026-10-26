@@ -38,7 +38,8 @@ const (
 )
 
 // ErrConnectionRefresh asks the long-lived Scout runner to recreate its pool
-// sessions after the current block sample has been uploaded.
+// sessions after all active block windows have closed. An emit callback may
+// return it to request an early refresh without abandoning overlapping blocks.
 var ErrConnectionRefresh = errors.New("refresh Stratum connections")
 
 var (
@@ -187,7 +188,10 @@ func Collect(ctx context.Context, pools []model.Pool, emit func(model.BlockSampl
 				sample, ok := blockSample(r, pendingSetup)
 				if ok {
 					if err := emit(sample); err != nil {
-						return err
+						if !errors.Is(err, ErrConnectionRefresh) {
+							return err
+						}
+						refreshEligibleAt = time.Time{}
 					}
 					clear(pendingSetup)
 				}

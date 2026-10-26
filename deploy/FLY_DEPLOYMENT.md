@@ -6,8 +6,11 @@ one continuous Scout Machine for every enabled entry in
 region catalog still defines every valid reporting vantage; this smaller
 deployment manifest defines only the operator-owned Fly Machines.
 
-The EWR Scout remains an independent VPS deployment. NRT and SIN remain valid
-measurement vantages but are not part of this Fly inventory.
+FRA (`europe`) and LAX (`us-west`) run in this app. EWR (`us-east`) runs on
+`m45core.com` as described in the [EWR server runbook](EWR_SERVER.md). Its
+stopped Fly Machine is retained only for rollback and must not be started
+while the server Scout is active. The former EWR VPS is retired. NRT and SIN
+remain valid measurement vantages but are not part of this Fly inventory.
 
 Each Fly Machine has one shared CPU, 256 MiB of memory, restart policy
 `always`, an ephemeral root filesystem, and no schedule, service, public IP,
@@ -77,13 +80,14 @@ Validate the Machine shape, stable pool sessions, a successful block upload,
 fresh StratumStats vantage health, and the absence of OOM exits. Repeat the
 same cutover for FRA only after LAX passes.
 
-Destroy the stopped legacy Machines only after both replacements are healthy.
+Destroy the stopped legacy Machines only after their replacements are healthy.
 Removing `INGEST_KEY_ID` and `INGEST_SECRET` from the BTCFlux app is a separate
 cleanup step because changing app secrets can restart its relay Machines.
 
 ## Routine updates
 
 Build a new digest-qualified image, deploy it to LAX first, and validate a
-completed block report before updating FRA. Never use `latest` or another
-floating tag. Keep the prior image reference and stopped Machine configuration
-until rollback is no longer required.
+completed block report before updating FRA. Update the EWR server service
+separately using its runbook. Never use `latest` or another floating tag.
+Keep the prior image reference and stopped Machine configuration until
+rollback is no longer required.

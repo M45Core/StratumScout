@@ -1,5 +1,13 @@
 [
   {
+    "code": "ewr",
+    "city": "Secaucus",
+    "country": "United States",
+    "enabled": false,
+    "vm_cpus": 1,
+    "vm_memory_mb": 256
+  },
+  {
     "code": "fra",
     "city": "Frankfurt",
     "country": "Germany",

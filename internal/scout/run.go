@@ -62,6 +62,10 @@ func runContinuously(ctx context.Context, cfg Config, run func(context.Context, 
 }
 
 func Run(ctx context.Context, cfg Config) error {
+	return run(ctx, cfg, probe.Collect)
+}
+
+func run(ctx context.Context, cfg Config, collect func(context.Context, []model.Pool, func(model.BlockSample) error) error) error {
 	var hardCtx context.Context
 	var hardCancel context.CancelFunc
 	if cfg.Continuous {
@@ -84,6 +88,8 @@ func Run(ctx context.Context, cfg Config) error {
 		return err
 	}
 	upload := newUploader(cfg, remote.ConfigRevision)
+	var nextConfig *ProbeConfig
+	var nextPools []model.Pool
 	mode := "continuous"
 	if !cfg.Continuous {
 		mode = cfg.RunFor.String()
@@ -92,18 +98,40 @@ func Run(ctx context.Context, cfg Config) error {
 	emit := func(sample model.BlockSample) error {
 		if err := upload.uploadBlock(hardCtx, sample); err != nil {
 			log.Printf("probe block=%s endpoints=%d upload=dropped", sample.BlockID, len(sample.EndpointSamples))
-			return nil
+		} else {
+			log.Printf("probe block=%s endpoints=%d uploaded", sample.BlockID, len(sample.EndpointSamples))
 		}
-		log.Printf("probe block=%s endpoints=%d uploaded", sample.BlockID, len(sample.EndpointSamples))
+		// Keep each sample's original revision and never retry it. Check even
+		// after a rejected upload: the collector may have forgotten the old
+		// revision after a restart or its grace period may have expired.
+		if nextConfig == nil {
+			latest, latestPools, err := fetchProbeConfig(hardCtx, cfg)
+			if err != nil {
+				log.Print("probe configuration refresh failed; keeping current Stratum sessions")
+			} else if latest.ConfigRevision != upload.revision {
+				nextConfig, nextPools = &latest, latestPools
+			}
+		}
+		if nextConfig != nil {
+			// Collect drains overlapping block windows before honoring this.
+			return probe.ErrConnectionRefresh
+		}
 		return nil
 	}
 	var collectErr error
 	for {
-		collectErr = probe.Collect(measureCtx, pools, emit)
+		collectErr = collect(measureCtx, pools, emit)
 		if !errors.Is(collectErr, probe.ErrConnectionRefresh) {
 			break
 		}
-		log.Print("refreshing Stratum sessions after maximum connection age")
+		if nextConfig != nil {
+			pools = nextPools
+			upload = newUploader(cfg, nextConfig.ConfigRevision)
+			log.Printf("refreshing Stratum sessions for configuration revision=%s endpoints=%d", nextConfig.ConfigRevision, endpointCount(pools))
+			nextConfig, nextPools = nil, nil
+		} else {
+			log.Print("refreshing Stratum sessions after maximum connection age")
+		}
 	}
 	if ctx.Err() != nil {
 		return nil

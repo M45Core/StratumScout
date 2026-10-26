@@ -40,8 +40,13 @@ boundary keeps the brief planned gap outside an active measurement window.
 Ordinary disconnects still reconnect with bounded backoff. Multiple attempts
 before one block collapse to the latest connection path. Scout does not send
 Stratum ping requests, and an idle authorized session remains blocked on its
-network read. Collector configuration is fetched once at process startup and
-changes take effect when Scout restarts.
+network read. Collector configuration is fetched at startup and checked after
+each block upload attempt, including rejected uploads. A validated revision
+change refreshes the pool sessions after all active block windows close; each
+completed sample is attempted once with its original revision. Failed or invalid
+configuration responses leave the current sessions running and are checked again
+after the next block. No periodic measurement uploads or configuration timers
+are added.
 
 Each accepted request is the completion proof for its entire block sample; no
 separate protocol or terminal records are uploaded. An unexpected observation
@@ -100,10 +105,12 @@ secret set.
 ## Fly deployment
 
 The operator-owned Fly deployment is a dedicated StratumScout app with
-continuous Machines in FRA and LAX. It does not share Machines, images, or
-secrets with BTCFlux. The EWR Scout remains an independent VPS deployment;
-NRT and SIN remain valid measurement vantages but are not in this Fly
-inventory.
+continuous Machines in FRA and LAX. These Fly Machines do not share images
+or secrets with BTCFlux. US East (`ewr`) runs as a separate user service on
+`m45core.com`, alongside the pool and BTCFlux; see the
+[EWR server runbook](deploy/EWR_SERVER.md). The former EWR VPS is retired,
+and the stopped EWR Fly Machine is retained only for rollback. NRT and SIN
+remain valid measurement vantages but are not in this Fly inventory.
 
 [`deploy/fly-regions.json`](deploy/fly-regions.json) is the Fly Machine source
 of truth. See the [Fly deployment runbook](deploy/FLY_DEPLOYMENT.md) for the
